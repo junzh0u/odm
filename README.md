@@ -24,10 +24,30 @@ $ odm upgrade
 
 ## Why not just `curl | tar -C ~/.local/bin`?
 
-Release tarballs bundle READMEs, licenses, man pages, and completion scripts
-that all land next to your binaries. odm extracts to a temp dir, moves in
-**only the declared binaries**, and writes a manifest so `uninstall` removes
-exactly what `install` added — nothing else.
+That's how odm started — and here's what the one-liner doesn't give you:
+
+- **Clean installs.** Release archives bundle READMEs, licenses, man pages,
+  and completion scripts that all land next to your binaries. odm extracts to
+  a temp dir and moves in **only the declared binaries** (zip archives too,
+  via `unzip` or `7z`).
+- **Exact uninstalls.** A manifest records what each install added, so
+  `uninstall` removes exactly that — nothing else.
+- **Version awareness.** odm resolves the concrete version behind
+  `releases/latest` and records it in a receipt; `list` shows installed vs
+  latest at a glance and `upgrade` reinstalls only what's actually outdated.
+  Binaries you installed by hand before odm show up as `legacy` (adopted by
+  the next `upgrade`) or `external` (provided elsewhere on `PATH`).
+- **A declarative catalog.** Packages live in one sourceable zsh file you can
+  keep in your dotfiles — check it in, sync it across machines, and every
+  host knows how to (re)install everything with one `odm install`/`upgrade`.
+- **Install-on-first-use.** Because the catalog is plain zsh, your shell can
+  source it and hook `command_not_found_handler` (snippet below): the first
+  time you type `yazi` on a machine that doesn't have it, the handler
+  installs it and then runs it with your original arguments — typing the
+  command is the setup step.
+- **Safety rails.** `-n` dry-runs any mutating command, failed downloads
+  leave the previous install untouched, and archives that don't contain the
+  expected binaries abort with a hint instead of half-installing.
 
 ## Install
 
