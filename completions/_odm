@@ -1,0 +1,48 @@
+#compdef odm
+
+_odm() {
+    local -a _odm_commands=(
+        'add:Register a package and install it'
+        'remove:Uninstall and unregister packages'
+        'install:Install registered packages'
+        'uninstall:Remove installed files (keeps the registration)'
+        'upgrade:Reinstall packages whose latest release differs'
+        'list:Show all packages with installed vs latest versions'
+    )
+
+    _arguments -s -S \
+        '(-b --bins)'{-b,--bins}'[Commands the archive provides (with add)]:bins' \
+        '(-f --force)'{-f,--force}'[Reinstall even if up to date / overwrite registration]' \
+        '(-n --dry-run)'{-n,--dry-run}'[Show what would happen without doing it]' \
+        '*'{-q,--quiet}'[Decrease verbosity]' \
+        '*'{-v,--verbose}'[Increase verbosity]' \
+        '(-h --help)'{-h,--help}'[Show help]' \
+        '1:command:->command' \
+        '*::arg:->args' && return
+
+    case $state in
+        command)
+            _describe -t commands 'odm command' _odm_commands
+            ;;
+        args)
+            local -a pkgs
+            case $words[1] in
+                install|remove)
+                    typeset -gA _odm_packages
+                    if (( ! ${#_odm_packages} )); then
+                        local catalog=${ODM_CATALOG:-${XDG_CONFIG_HOME:-$HOME/.config}/odm/packages.zsh}
+                        [[ -r $catalog ]] && source $catalog
+                    fi
+                    pkgs=(${(k)_odm_packages})
+                    _describe -t packages 'package' pkgs
+                    ;;
+                uninstall|upgrade)
+                    pkgs=(${ODM_STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/odm}/*(N/:t))
+                    _describe -t packages 'installed package' pkgs
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_odm "$@"

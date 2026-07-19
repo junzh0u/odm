@@ -1,0 +1,521 @@
+#!/usr/bin/env zsh
+#
+# odm — on-demand manager
+#
+# Installs prebuilt binaries from GitHub release archives (.tar.gz/.tgz/.zip)
+# into a bin dir on your PATH, tracking what it installed so packages can be
+# cleanly uninstalled and upgraded.
+#
+# Self-contained: a single file depending only on zsh, curl, tar, and
+# unzip-or-7z for .zip archives. No other files from this repo are required.
+#
+# Completion: completions/_odm — keep in sync when adding/changing options.
+#
+# Catalog file (ODM_CATALOG) is plain zsh, safe to source from a shell rc:
+#   typeset -gA _odm_packages=( [pkg]="https://..." )   # package -> archive URL
+#   typeset -gA _odm_bins=( [pkg]="cmd1 cmd2" )         # only when commands != pkg
+# URLs may embed a version template: {v:1.2.3} pins a fallback version used
+# when resolving the latest release fails; {v} repeats the resolved version.
+
+setopt no_unset
+zmodload zsh/datetime
+
+: ${ODM_CATALOG:=${XDG_CONFIG_HOME:-$HOME/.config}/odm/packages.zsh}
+: ${ODM_STATE_DIR:=${XDG_DATA_HOME:-$HOME/.local/share}/odm}
+: ${ODM_BIN_DIR:=$HOME/.local/bin}
+
+# === Logging ===
+
+if [[ -t 2 && -z ${NO_COLOR:-} ]]; then
+    _c_red=$'\e[31m' _c_yellow=$'\e[33m' _c_reset=$'\e[0m'
+else
+    _c_red= _c_yellow= _c_reset=
+fi
+
+function log_error()   { print -u2 -r -- "${_c_red}[odm] $*${_c_reset}" }
+function log_warning() { print -u2 -r -- "${_c_yellow}[odm] $*${_c_reset}" }
+function log_info()    { (( VERBOSITY >= 0 )) && print -u2 -r -- "[odm] $*"; true }
+function log_debug()   { (( VERBOSITY >= 1 )) && print -u2 -r -- "[odm] $*"; true }
+function log_fatal()   { log_error $1; exit ${2:-1} }
+
+# === Usage ===
+
+function usage() {
+    cat <<'EOF'
+Usage: odm [options] <command> [args]
+
+Commands:
+  add <pkg> <url>     Register a package and install it. The URL points at a
+                      .tar.gz/.tgz/.zip release asset; {v:X.Y.Z} in it pins a
+                      fallback version, {v} repeats the resolved version.
+  remove <pkg>...     Uninstall and unregister packages
+  install <pkg>...    Install registered packages
+  uninstall <pkg>...  Remove installed files (keeps the registration)
+  upgrade [pkg...]    Reinstall packages whose latest release differs from the
+                      installed one (default: every installed package)
+  list                Show all packages with installed vs latest versions
+
+Options:
+  -b, --bins BINS   With add: space-separated commands the archive provides,
+                    when they differ from the package name
+  -f, --force       Reinstall even if up to date; with add, overwrite an
+                    existing registration
+  -n, --dry-run     Show what would happen without doing it
+  -q, --quiet       Decrease verbosity
+  -v, --verbose     Increase verbosity
+  -h, --help        Show this help
+
+Environment:
+  ODM_CATALOG    Catalog file (default: ~/.config/odm/packages.zsh)
+  ODM_STATE_DIR  Manifests and receipts (default: ~/.local/share/odm)
+  ODM_BIN_DIR    Where binaries are installed (default: ~/.local/bin)
+
+Exit codes:
+  0   Success
+  2   Wrong usage
+  10  Unknown package
+  11  Download or extraction failed
+  12  Package already registered
+  13  Expected binaries not found in archive
+EOF
+}
+
+function wrong_usage() {
+    log_error $1
+    usage >&2
+    exit 2
+}
+
+# === Argparse ===
+
+typeset -a FLAG_DRY_RUN FLAG_FORCE FLAG_HELP FLAG_QUIET FLAG_VERBOSE ARG_BINS
+zparseopts -D -E -F -- \
+    {n,-dry-run}=FLAG_DRY_RUN \
+    {f,-force}=FLAG_FORCE \
+    {h,-help}=FLAG_HELP \
+    {q,-quiet}+=FLAG_QUIET \
+    {v,-verbose}+=FLAG_VERBOSE \
+    {b,-bins}:=ARG_BINS || exit 2
+VERBOSITY=$(( ${VERBOSITY:-0} + $#FLAG_VERBOSE - $#FLAG_QUIET ))
+if (( $#FLAG_HELP )); then
+    usage
+    exit 0
+fi
+
+# === Catalog ===
+
+typeset -gA _odm_packages=() _odm_bins=()
+
+function load_catalog() {
+    [[ -r $ODM_CATALOG ]] && source $ODM_CATALOG
+    true
+}
+
+function write_catalog() {
+    local tmp=$ODM_CATALOG.tmp.$$ key=
+    mkdir -p ${ODM_CATALOG:h}
+    {
+        print -r -- "# Managed by odm — rewritten wholesale on add/remove/upgrade (sorted keys)."
+        print -r -- "# Safe to source from a shell rc: definitions only."
+        print -r -- "typeset -gA _odm_packages=("
+        for key in ${(ok)_odm_packages}; do
+            print -r -- "    [$key]=\"${_odm_packages[$key]}\""
+        done
+        print -r -- ")"
+        print -r -- "typeset -gA _odm_bins=("
+        for key in ${(ok)_odm_bins}; do
+            print -r -- "    [$key]=\"${_odm_bins[$key]}\""
+        done
+        print -r -- ")"
+    } > $tmp && mv $tmp $ODM_CATALOG
+}
+
+function bins_for() {
+    print -r -- ${_odm_bins[$1]:-$1}
+}
+
+function require_registered() {
+    local pkg=
+    for pkg in $@; do
+        [[ -n ${_odm_packages[$pkg]:-} ]] || log_fatal "unknown package: $pkg" 10
+    done
+}
+
+# === Release resolution ===
+
+function latest_tag() {
+    local repo=${1#https://github.com/}
+    repo=${repo%%/releases/*}
+    curl -sI "https://github.com/$repo/releases/latest" 2>/dev/null \
+        | grep -i '^location:' | sed 's|.*/||;s/\r//'
+}
+
+# Sets globals: resolved_url, resolved_version ("unknown" when undeterminable),
+# resolved_fallback (1 when a {v:pin} lookup failed and the pin was used).
+function resolve_release() {
+    local url=$1 tag=
+    typeset -g resolved_url=$url resolved_version=unknown resolved_fallback=0
+    if [[ $url == *'{v:'* ]]; then
+        local pin=${url##*\{v:}
+        pin=${pin%%\}*}
+        tag=$(latest_tag $url)
+        if [[ -n $tag ]]; then
+            resolved_version=${tag#v}
+        else
+            resolved_version=$pin
+            resolved_fallback=1
+        fi
+        resolved_url=${url//\{v:$pin\}/$resolved_version}
+        resolved_url=${resolved_url//\{v\}/$resolved_version}
+    elif [[ $url == */releases/latest/download/* ]]; then
+        tag=$(latest_tag $url)
+        [[ -n $tag ]] && resolved_version=${tag#v}
+    elif [[ $url == */releases/download/* ]]; then
+        tag=${${url#*/releases/download/}%%/*}
+        resolved_version=${tag#v}
+    fi
+}
+
+# === State ===
+
+function is_installed() {
+    [[ -d $ODM_STATE_DIR/$1 ]]
+}
+
+function is_legacy_installed() {
+    local bin=
+    is_installed $1 && return 1
+    for bin in ${=$(bins_for $1)}; do
+        [[ -x $ODM_BIN_DIR/$bin ]] || return 1
+    done
+    return 0
+}
+
+function receipt_version() {
+    local line=
+    if [[ -r $ODM_STATE_DIR/$1/receipt ]]; then
+        while IFS= read -r line; do
+            [[ $line == version=* ]] && { print -r -- ${line#version=}; return }
+        done < $ODM_STATE_DIR/$1/receipt
+    fi
+    print -r -- unknown
+}
+
+function manifest_files() {
+    [[ -r $ODM_STATE_DIR/$1/manifest ]] || return 0
+    print -r -- "$(<$ODM_STATE_DIR/$1/manifest)"
+}
+
+function is_elf() {
+    local magic=
+    read -k4 -u0 magic < $1 2>/dev/null
+    [[ $magic == $'\x7fELF' ]]
+}
+
+# === Install / uninstall ===
+
+function delete_manifest_files() {
+    local pkg=$1 file=
+    for file in ${(f)"$(manifest_files $pkg)"}; do
+        if [[ -e $file || -L $file ]]; then
+            rm -f -- $file
+        else
+            log_warning "$pkg: manifest file already missing: $file"
+        fi
+    done
+}
+
+# do_install <pkg> [<url> <version> <fallback>] — pre-resolved values optional.
+function do_install() {
+    local pkg=$1 template=${_odm_packages[$pkg]}
+    if (( $# > 1 )); then
+        local resolved_url=$2 resolved_version=$3 resolved_fallback=$4
+    else
+        resolve_release $template
+    fi
+
+    if (( $#FLAG_DRY_RUN )); then
+        log_info "would install $pkg $resolved_version from $resolved_url"
+        return 0
+    fi
+
+    log_info "installing $pkg $resolved_version..."
+    local tmp=$(mktemp -d) bin= file=
+    {
+        mkdir $tmp/x
+        if [[ $resolved_url == *.zip ]]; then
+            curl -fsSL $resolved_url -o $tmp/pkg.zip \
+                || log_fatal "$pkg: download failed: $resolved_url" 11
+            if (( $+commands[unzip] )); then
+                unzip -qo $tmp/pkg.zip -d $tmp/x \
+                    || log_fatal "$pkg: unzip failed" 11
+            elif (( $+commands[7z] )); then
+                7z x -y -o$tmp/x $tmp/pkg.zip > /dev/null \
+                    || log_fatal "$pkg: 7z extraction failed" 11
+            else
+                log_fatal "$pkg: need unzip or 7z to extract $resolved_url" 11
+            fi
+        else
+            curl -fsSL $resolved_url | tar xzf - -C $tmp/x
+            local -a ps=($pipestatus)
+            (( ps[1] == 0 && ps[2] == 0 )) \
+                || log_fatal "$pkg: download or extraction failed: $resolved_url" 11
+        fi
+
+        # Select only the declared binaries — release archives bundle READMEs,
+        # licenses, and completion scripts that must not land in ODM_BIN_DIR.
+        local -a selected=() missing=()
+        for bin in ${=$(bins_for $pkg)}; do
+            local -a matches=($tmp/x/**/$bin(*.N))
+            if (( $#matches == 0 )); then
+                missing+=($bin)
+                continue
+            fi
+            if (( $#matches > 1 )); then
+                local shortest=$matches[1] m=
+                for m in $matches; do
+                    (( $#m < $#shortest )) && shortest=$m
+                done
+                log_warning "$pkg: multiple matches for '$bin', using ${shortest#$tmp/x/}"
+                matches=($shortest)
+            fi
+            selected+=($matches[1])
+        done
+        if (( $#missing )); then
+            local -a elves=()
+            for file in $tmp/x/**/*(*.N); do
+                is_elf $file && elves+=(${file#$tmp/x/})
+            done
+            log_error "$pkg: archive has no executable named: $missing"
+            (( $#elves )) && log_error "$pkg: executables found instead: $elves — declare with -b"
+            exit 13
+        fi
+
+        # Clean out the previous install (if any) before moving the new files in.
+        delete_manifest_files $pkg
+        mkdir -p $ODM_BIN_DIR $ODM_STATE_DIR/$pkg
+        for file in $selected; do
+            chmod +x $file
+            mv -f -- $file $ODM_BIN_DIR/
+        done
+        print -rl -- $ODM_BIN_DIR/${^selected:t} > $ODM_STATE_DIR/$pkg/manifest
+        {
+            print -r -- "version=$resolved_version"
+            print -r -- "url=$resolved_url"
+            print -r -- "template=$template"
+            print -r -- "installed_at=$EPOCHSECONDS"
+        } > $ODM_STATE_DIR/$pkg/receipt
+    } always {
+        rm -rf $tmp
+    }
+
+    # Keep the {v:pin} offline fallback fresh: bump it to the version we just
+    # installed (never from a failed lookup, which resolves *to* the pin).
+    if [[ $template == *'{v:'* ]] && (( ! resolved_fallback )); then
+        local pin=${template##*\{v:}
+        pin=${pin%%\}*}
+        if [[ $pin != $resolved_version ]]; then
+            _odm_packages[$pkg]=${template/\{v:$pin\}/\{v:$resolved_version\}}
+            write_catalog
+            log_info "bumped $pkg fallback pin $pin -> $resolved_version in catalog (remember to commit)"
+        fi
+    fi
+    log_info "installed $pkg $resolved_version"
+}
+
+function do_uninstall() {
+    local pkg=$1
+    if (( $#FLAG_DRY_RUN )); then
+        log_info "would uninstall $pkg: ${(j: :)${(f)"$(manifest_files $pkg)"}}"
+        return 0
+    fi
+    delete_manifest_files $pkg
+    rm -rf $ODM_STATE_DIR/$pkg
+    log_info "uninstalled $pkg"
+}
+
+# === Verbs ===
+
+function cmd_add() {
+    (( $# == 2 )) || wrong_usage "add expects <pkg> <url>"
+    local pkg=$1 url=$2
+    [[ $url == https://*.(tar.gz|tgz|zip) ]] \
+        || wrong_usage "URL must be https and end in .tar.gz/.tgz/.zip: $url"
+    [[ $url == https://github.com/*/releases/* ]] \
+        || log_warning "not a GitHub releases URL — version tracking will be 'unknown'"
+    if [[ -n ${_odm_packages[$pkg]:-} ]] && (( ! $#FLAG_FORCE )); then
+        log_fatal "$pkg already registered (use -f to overwrite): ${_odm_packages[$pkg]}" 12
+    fi
+    # Mutate in memory even for dry runs (do_install needs the entry);
+    # only the catalog write is gated.
+    _odm_packages[$pkg]=$url
+    if (( $#ARG_BINS )) && [[ ${ARG_BINS[-1]} != $pkg ]]; then
+        _odm_bins[$pkg]=${ARG_BINS[-1]}
+    else
+        unset "_odm_bins[$pkg]"
+    fi
+    if (( $#FLAG_DRY_RUN )); then
+        log_info "would register $pkg -> $url"
+    else
+        write_catalog
+    fi
+    do_install $pkg
+}
+
+function cmd_remove() {
+    (( $# >= 1 )) || wrong_usage "remove expects at least one package"
+    require_registered $@
+    local pkg=
+    for pkg in $@; do
+        is_installed $pkg && do_uninstall $pkg
+        if (( $#FLAG_DRY_RUN )); then
+            log_info "would unregister $pkg"
+        else
+            unset "_odm_packages[$pkg]" "_odm_bins[$pkg]"
+        fi
+    done
+    (( $#FLAG_DRY_RUN )) || write_catalog
+}
+
+function cmd_install() {
+    (( $# >= 1 )) || wrong_usage "install expects at least one package"
+    require_registered $@
+    local pkg=
+    for pkg in $@; do
+        if is_installed $pkg && (( ! $#FLAG_FORCE )); then
+            log_info "$pkg already installed ($(receipt_version $pkg))"
+        else
+            do_install $pkg
+        fi
+    done
+}
+
+function cmd_uninstall() {
+    (( $# >= 1 )) || wrong_usage "uninstall expects at least one package"
+    local pkg=
+    for pkg in $@; do
+        if is_installed $pkg; then
+            do_uninstall $pkg
+        elif [[ -n ${_odm_packages[$pkg]:-} ]]; then
+            log_info "$pkg not installed"
+        else
+            log_fatal "unknown package: $pkg" 10
+        fi
+    done
+}
+
+function cmd_upgrade() {
+    local -a targets=($@)
+    local pkg=
+    if (( $#targets == 0 )); then
+        for pkg in ${(ok)_odm_packages}; do
+            if is_installed $pkg || is_legacy_installed $pkg; then
+                targets+=($pkg)
+            fi
+        done
+        if (( $#targets == 0 )); then
+            log_info "nothing installed"
+            return 0
+        fi
+    fi
+    require_registered $targets
+    for pkg in $targets; do
+        resolve_release ${_odm_packages[$pkg]}
+        local current=$(receipt_version $pkg)
+        if (( $#FLAG_FORCE )); then
+            do_install $pkg $resolved_url $resolved_version $resolved_fallback
+        elif [[ $resolved_version == unknown && $current != unknown ]]; then
+            log_warning "$pkg: cannot resolve latest version, keeping $current (use -f to reinstall)"
+        elif [[ $current == $resolved_version ]]; then
+            log_info "$pkg up to date ($current)"
+        else
+            do_install $pkg $resolved_url $resolved_version $resolved_fallback
+        fi
+    done
+}
+
+function cmd_list() {
+    (( $# == 0 )) || wrong_usage "list expects no argument"
+    local tmp=$(mktemp -d)
+    local pkg= row= line= yellow= dim= reset=
+    local -a rows cols widths
+    local -i i
+    {
+        # Resolve latest versions concurrently — serial HEAD requests to GitHub
+        # would make list crawl.
+        for pkg in ${(k)_odm_packages}; do
+            {
+                resolve_release ${_odm_packages[$pkg]}
+                (( resolved_fallback )) && resolved_version=unknown
+                print -r -- $resolved_version > $tmp/$pkg.latest
+            } &
+        done
+        wait
+
+        if [[ -t 1 && -z ${NO_COLOR:-} ]]; then
+            yellow=$'\e[33m' dim=$'\e[2m' reset=$'\e[0m'
+        fi
+        rows=("PACKAGE|BINS|INSTALLED|LATEST|STATUS")
+        for pkg in ${(ok)_odm_packages}; do
+            local bins=$(bins_for $pkg) latest= installed=- pkg_status=
+            [[ -r $tmp/$pkg.latest ]] && latest=$(<$tmp/$pkg.latest)
+            [[ -z $latest || $latest == unknown ]] && latest="?"
+            if is_installed $pkg; then
+                installed=$(receipt_version $pkg)
+                if [[ $installed == unknown ]]; then
+                    pkg_status=legacy
+                elif [[ $latest != "?" && $installed != $latest ]]; then
+                    pkg_status=stale
+                fi
+            elif is_legacy_installed $pkg; then
+                installed=unknown
+                pkg_status=legacy
+            else
+                pkg_status="not installed"
+            fi
+            rows+=("$pkg|$bins|$installed|$latest|$pkg_status")
+        done
+
+        widths=(7 4 9 6)  # header column widths
+        for row in $rows; do
+            cols=("${(@s:|:)row}")
+            for i in 1 2 3 4; do
+                (( ${#cols[i]} > widths[i] )) && widths[i]=${#cols[i]}
+            done
+        done
+        for row in $rows; do
+            cols=("${(@s:|:)row}")
+            line=$(printf "%-${widths[1]}s  %-${widths[2]}s  %-${widths[3]}s  %-${widths[4]}s  %s" \
+                $cols[1] $cols[2] $cols[3] $cols[4] "${cols[5]:-}")
+            case ${cols[5]:-} in
+                stale) print -r -- "$yellow$line$reset" ;;
+                legacy|"not installed") print -r -- "$dim$line$reset" ;;
+                *) print -r -- $line ;;
+            esac
+        done
+    } always {
+        rm -rf $tmp
+    }
+}
+
+# === Dispatch ===
+
+load_catalog
+
+(( $# >= 1 )) || wrong_usage "missing command"
+verb=$1
+shift
+
+if (( $#ARG_BINS )) && [[ $verb != add ]]; then
+    wrong_usage "-b/--bins is only valid with add"
+fi
+
+case $verb in
+    add)       cmd_add $@ ;;
+    remove)    cmd_remove $@ ;;
+    install)   cmd_install $@ ;;
+    uninstall) cmd_uninstall $@ ;;
+    upgrade)   cmd_upgrade $@ ;;
+    list)      cmd_list $@ ;;
+    *)         wrong_usage "unknown command: $verb" ;;
+esac
