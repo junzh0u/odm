@@ -40,11 +40,10 @@ That's how odm started — and here's what the one-liner doesn't give you:
 - **A declarative catalog.** Packages live in one sourceable zsh file you can
   keep in your dotfiles — check it in, sync it across machines, and every
   host knows how to (re)install everything with one `odm install`/`upgrade`.
-- **Install-on-first-use.** Because the catalog is plain zsh, your shell can
-  source it and hook `command_not_found_handler` (snippet below): the first
-  time you type `yazi` on a machine that doesn't have it, the handler
-  installs it and then runs it with your original arguments — typing the
-  command is the setup step.
+- **Install-on-first-use.** One line in your rc — `source <(odm init zsh)` —
+  hooks `command_not_found_handler`: the first time you type `yazi` on a
+  machine that doesn't have it, odm installs it and then runs it with your
+  original arguments. Typing the command is the setup step.
 - **Safety rails.** `-n` dry-runs any mutating command, failed downloads
   leave the previous install untouched, and archives that don't contain the
   expected binaries abort with a hint instead of half-installing.
@@ -116,28 +115,18 @@ Three URL shapes are understood:
 
 ## Auto-install on first use
 
-Because the catalog is sourceable zsh, a `command_not_found_handler` can
-install packages the moment they're first invoked:
+Add one line to your `.zshrc` (or `.zshenv`, to cover scripts too):
 
 ```zsh
-source ~/.config/odm/packages.zsh
-
-function command_not_found_handler() {
-    local cmd=$1; shift
-    local pkg
-    for pkg in ${(k)_odm_bins}; do
-        (( ${${=_odm_bins[$pkg]}[(Ie)$cmd]} )) && break
-        pkg=
-    done
-    : ${pkg:=${_odm_packages[$cmd]:+$cmd}}
-    if [[ -z $pkg ]] || ! odm install $pkg; then
-        print -u2 "zsh: command not found: $cmd"
-        return 127
-    fi
-    rehash
-    command $cmd "$@"
-}
+source <(odm init zsh)
 ```
+
+It sources the catalog and hooks `command_not_found_handler`: the first time
+you type a cataloged command that isn't installed, odm installs it and then
+runs it with your original arguments. Anything not in the catalog still fails
+with the usual `command not found` (exit 127). Prefer zero forks at shell
+startup? `odm init zsh` just prints zsh — paste its output into your rc
+instead.
 
 ## Tests
 

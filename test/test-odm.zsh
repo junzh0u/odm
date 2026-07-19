@@ -204,6 +204,25 @@ assert_contains "catalog records bins" "$(<$catalog)" '[mvx]="cpx mvx"'
 assert_equals "manifest has both files" "$bindir/cpx
 $bindir/mvx" "$(<$state/mvx/manifest)"
 
+# ── Test: init ─────────────────────────────────────────────────────
+
+log_info "── init ──"
+
+run_odm init zsh
+assert_exit_code "init zsh succeeds" 0 $code
+assert_contains "init emits the handler" "$output" command_not_found_handler
+run_odm init bash
+assert_exit_code "init for unsupported shell exits 2" 2 $code
+run_odm init
+assert_exit_code "init without shell exits 2" 2 $code
+
+# The emitted integration actually works when sourced: catalog loaded,
+# aliased bin mapped to its package.
+code=0
+output=$(ODM_CATALOG=$catalog zsh -c "source <(zsh $odm init zsh); _odm_package_for cpx" 2>&1) || code=$?
+assert_exit_code "sourced integration succeeds" 0 $code
+assert_equals "sourced integration maps aliased bin" mvx $output
+
 # ── Test: unknown package ──────────────────────────────────────────
 
 run_odm install nosuchpkg

@@ -54,6 +54,9 @@ Commands:
   upgrade [pkg...]    Reinstall packages whose latest release differs from the
                       installed one (default: every installed package)
   list                Show all packages with installed vs latest versions
+  init zsh            Print shell integration: sources the catalog and enables
+                      install-on-first-use. Add to your rc:
+                        source <(odm init zsh)
 
 Options:
   -b, --bins BINS   With add: space-separated commands the archive provides,
@@ -494,6 +497,38 @@ function cmd_list() {
     }
 }
 
+function cmd_init() {
+    (( $# == 1 )) || wrong_usage "init expects a shell name"
+    [[ $1 == zsh ]] || wrong_usage "init: only zsh is supported"
+    cat <<'EOF'
+# odm shell integration — install cataloged packages on first use.
+export ODM_CATALOG=${ODM_CATALOG:-${XDG_CONFIG_HOME:-$HOME/.config}/odm/packages.zsh}
+typeset -gA _odm_packages _odm_bins
+[[ -r $ODM_CATALOG ]] && source $ODM_CATALOG
+
+# Map a command to the package providing it (fork-free; only runs on a miss).
+function _odm_package_for() {
+    local cmd=$1 pkg
+    for pkg in ${(k)_odm_bins}; do
+        (( ${${=_odm_bins[$pkg]}[(Ie)$cmd]} )) && { print -r -- $pkg; return 0 }
+    done
+    (( ${+_odm_packages[$cmd]} )) && { print -r -- $cmd; return 0 }
+    return 1
+}
+
+function command_not_found_handler() {
+    local cmd=$1; shift
+    local pkg
+    if ! pkg=$(_odm_package_for $cmd) || ! odm install $pkg; then
+        print -u2 "zsh: command not found: $cmd"
+        return 127
+    fi
+    rehash  # child odm can't rehash this shell
+    command $cmd "$@"
+}
+EOF
+}
+
 # === Dispatch ===
 
 load_catalog
@@ -513,5 +548,6 @@ case $verb in
     uninstall) cmd_uninstall $@ ;;
     upgrade)   cmd_upgrade $@ ;;
     list)      cmd_list $@ ;;
+    init)      cmd_init $@ ;;
     *)         wrong_usage "unknown command: $verb" ;;
 esac
