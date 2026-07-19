@@ -233,9 +233,9 @@ assert_equals "only foo remains registered" foo "$(catalog_keys)"
 run_odm remove mvx
 assert_exit_code "remove of unregistered package exits 10" 10 $code
 
-# ── Test: {v:pin} template resolution and pin bump ─────────────────
+# ── Test: {v} template resolution ──────────────────────────────────
 
-log_info "── {v:pin} templates ──"
+log_info "── {v} templates ──"
 
 src=$tmp/fixtures/tool-src
 make_exe $src/tool tool-v2
@@ -243,17 +243,20 @@ make_tar $tmp/fixtures/tool.tar.gz $src
 
 stub_latest=2.0.0
 stub_archive=$tmp/fixtures/tool.tar.gz
-run_odm add tool "https://github.com/stub/repo/releases/download/v{v:1.0.0}/tool-{v}.tar.gz"
+run_odm add tool "https://github.com/stub/repo/releases/download/v{v}/tool-{v}.tar.gz"
 assert_exit_code "templated add succeeds" 0 $code
 assert_contains "receipt has resolved version" "$(<$state/tool/receipt)" "version=2.0.0"
 assert_contains "receipt url has version substituted" "$(<$state/tool/receipt)" "url=https://github.com/stub/repo/releases/download/v2.0.0/tool-2.0.0.tar.gz"
-assert_contains "catalog pin bumped to resolved version" "$(<$catalog)" '{v:2.0.0}'
+assert_contains "catalog keeps the template untouched" "$(<$catalog)" '{v}/tool-{v}.tar.gz'
 
-stub_latest=  # simulate lookup failure -> pinned fallback
+stub_latest=  # lookup failure -> install fails loudly, state untouched
 run_odm install -f tool
-assert_exit_code "fallback install succeeds" 0 $code
-assert_contains "fallback used pinned version" "$(<$state/tool/receipt)" "version=2.0.0"
-assert_contains "pin not rewritten by fallback" "$(<$catalog)" '{v:2.0.0}'
+assert_exit_code "unresolvable template install exits 11" 11 $code
+assert_contains "error names the resolution failure" "$output" "cannot resolve latest release version"
+assert_contains "existing install untouched by failed resolve" "$(<$state/tool/receipt)" "version=2.0.0"
+run_odm upgrade tool
+assert_exit_code "unresolvable upgrade keeps current install" 0 $code
+assert_contains "upgrade warns and keeps current" "$output" "cannot resolve latest version, keeping 2.0.0"
 
 # ── Test: upgrade ──────────────────────────────────────────────────
 

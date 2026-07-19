@@ -14,8 +14,8 @@
 # Catalog file (ODM_CATALOG) is plain zsh, safe to source from a shell rc:
 #   typeset -gA _odm_packages=( [pkg]="https://..." )   # package -> archive URL
 #   typeset -gA _odm_bins=( [pkg]="cmd1 cmd2" )         # only when commands != pkg
-# URLs may embed a version template: {v:1.2.3} pins a fallback version used
-# when resolving the latest release fails; {v} repeats the resolved version.
+# URLs may embed {v}, which expands to the latest release version (tag without
+# its leading v) at install time — for assets whose path embeds the version.
 
 setopt no_unset
 zmodload zsh/datetime
@@ -46,8 +46,8 @@ Usage: odm [options] <command> [args]
 
 Commands:
   add <pkg> <url>     Register a package and install it. The URL points at a
-                      .tar.gz/.tgz/.zip release asset; {v:X.Y.Z} in it pins a
-                      fallback version, {v} repeats the resolved version.
+                      .tar.gz/.tgz/.zip release asset; {v} in it expands to
+                      the latest release version (tag without leading v).
   remove <pkg>...     Uninstall and unregister packages
   install <pkg>...    Install registered packages
   uninstall <pkg>...  Remove installed files (keeps the registration)
@@ -74,7 +74,7 @@ Exit codes:
   0   Success
   2   Wrong usage
   10  Unknown package
-  11  Download or extraction failed
+  11  Version resolution, download, or extraction failed
   12  Package already registered
   13  Expected binaries not found in archive
 EOF
@@ -150,23 +150,17 @@ function latest_tag() {
         | grep -i '^location:' | sed 's|.*/||;s/\r//'
 }
 
-# Sets globals: resolved_url, resolved_version ("unknown" when undeterminable),
-# resolved_fallback (1 when a {v:pin} lookup failed and the pin was used).
+# Sets globals: resolved_url (still containing {v} when a template couldn't be
+# resolved) and resolved_version ("unknown" when undeterminable).
 function resolve_release() {
     local url=$1 tag=
-    typeset -g resolved_url=$url resolved_version=unknown resolved_fallback=0
-    if [[ $url == *'{v:'* ]]; then
-        local pin=${url##*\{v:}
-        pin=${pin%%\}*}
+    typeset -g resolved_url=$url resolved_version=unknown
+    if [[ $url == *'{v}'* ]]; then
         tag=$(latest_tag $url)
         if [[ -n $tag ]]; then
             resolved_version=${tag#v}
-        else
-            resolved_version=$pin
-            resolved_fallback=1
+            resolved_url=${url//\{v\}/$resolved_version}
         fi
-        resolved_url=${url//\{v:$pin\}/$resolved_version}
-        resolved_url=${resolved_url//\{v\}/$resolved_version}
     elif [[ $url == */releases/latest/download/* ]]; then
         tag=$(latest_tag $url)
         [[ -n $tag ]] && resolved_version=${tag#v}
@@ -225,13 +219,16 @@ function delete_manifest_files() {
     done
 }
 
-# do_install <pkg> [<url> <version> <fallback>] — pre-resolved values optional.
+# do_install <pkg> [<url> <version>] — pre-resolved values optional.
 function do_install() {
     local pkg=$1 template=${_odm_packages[$pkg]}
     if (( $# > 1 )); then
-        local resolved_url=$2 resolved_version=$3 resolved_fallback=$4
+        local resolved_url=$2 resolved_version=$3
     else
         resolve_release $template
+    fi
+    if [[ $resolved_url == *'{v}'* ]]; then
+        log_fatal "$pkg: cannot resolve latest release version for $template" 11
     fi
 
     if (( $#FLAG_DRY_RUN )); then
@@ -308,18 +305,6 @@ function do_install() {
     } always {
         rm -rf $tmp
     }
-
-    # Keep the {v:pin} offline fallback fresh: bump it to the version we just
-    # installed (never from a failed lookup, which resolves *to* the pin).
-    if [[ $template == *'{v:'* ]] && (( ! resolved_fallback )); then
-        local pin=${template##*\{v:}
-        pin=${pin%%\}*}
-        if [[ $pin != $resolved_version ]]; then
-            _odm_packages[$pkg]=${template/\{v:$pin\}/\{v:$resolved_version\}}
-            write_catalog
-            log_info "bumped $pkg fallback pin $pin -> $resolved_version in catalog (remember to commit)"
-        fi
-    fi
     log_info "installed $pkg $resolved_version"
 }
 
@@ -423,13 +408,13 @@ function cmd_upgrade() {
         resolve_release ${_odm_packages[$pkg]}
         local current=$(receipt_version $pkg)
         if (( $#FLAG_FORCE )); then
-            do_install $pkg $resolved_url $resolved_version $resolved_fallback
+            do_install $pkg $resolved_url $resolved_version
         elif [[ $resolved_version == unknown && $current != unknown ]]; then
             log_warning "$pkg: cannot resolve latest version, keeping $current (use -f to reinstall)"
         elif [[ $current == $resolved_version ]]; then
             log_info "$pkg up to date ($current)"
         else
-            do_install $pkg $resolved_url $resolved_version $resolved_fallback
+            do_install $pkg $resolved_url $resolved_version
         fi
     done
 }
@@ -446,7 +431,6 @@ function cmd_list() {
         for pkg in ${(k)_odm_packages}; do
             {
                 resolve_release ${_odm_packages[$pkg]}
-                (( resolved_fallback )) && resolved_version=unknown
                 print -r -- $resolved_version > $tmp/$pkg.latest
             } &
         done

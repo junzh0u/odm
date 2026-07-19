@@ -9,7 +9,7 @@ Point it at a release archive; it installs just the binaries into
 upgrade later.
 
 ```console
-$ odm add just "https://github.com/casey/just/releases/download/{v:1.55.1}/just-{v}-x86_64-unknown-linux-musl.tar.gz"
+$ odm add just "https://github.com/casey/just/releases/download/{v}/just-{v}-x86_64-unknown-linux-musl.tar.gz"
 [odm] installing just 1.55.1...
 [odm] installed just 1.55.1
 
@@ -58,14 +58,17 @@ the package name), `-q`/`-v`, `-h`.
 
 Three URL shapes are understood:
 
-- `.../releases/latest/download/<asset>` — always fetches the latest; the
-  concrete version is resolved (via the `releases/latest` redirect) and
-  recorded for `list`/`upgrade` comparisons.
-- `.../releases/download/{v:1.2.3}/asset-{v}.tar.gz` — templated: `{v:X}`
-  resolves to the latest release tag, falling back to the pinned `X` when the
-  lookup fails (offline-friendly); `{v}` repeats the resolved version. After a
-  successful install of a newer version, odm bumps the pin in the catalog so
-  the fallback stays fresh.
+- `.../releases/latest/download/<asset>` — for projects whose asset names are
+  version-independent. Always fetches the latest; the concrete version is
+  resolved (via the `releases/latest` redirect) and recorded for
+  `list`/`upgrade` comparisons.
+- `.../releases/download/{v}/asset-{v}.tar.gz` — for projects that embed the
+  version in the tag path or asset filename (fzf, just, zoxide, …), where no
+  version-independent URL exists. Every `{v}` expands to the latest release
+  version — the tag from the `releases/latest` redirect, minus any leading
+  `v` (write the tag's `v` literally in the URL where the project uses one,
+  e.g. `.../download/v{v}/...`). If the lookup fails, `install`/`upgrade`
+  fail loudly rather than guess.
 - Any other https `.tar.gz`/`.tgz`/`.zip` URL — works, but the version shows
   as `unknown`, so `upgrade` reinstalls it each time.
 
