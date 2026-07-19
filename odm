@@ -472,6 +472,18 @@ function cmd_list() {
                 pkg_status=legacy
             else
                 pkg_status="not installed"
+                # All declared bins resolving on PATH outside ODM_BIN_DIR means
+                # something else (system package, manual install) provides them.
+                local -a want=(${=bins}) external=()
+                local b= found=
+                for b in $want; do
+                    found=$(whence -p $b 2>/dev/null) || break
+                    [[ ${found:A:h} == ${ODM_BIN_DIR:A} ]] && break
+                    external+=($found)
+                done
+                if (( $#external == $#want )); then
+                    pkg_status="external (${external[1]:h})"
+                fi
             fi
             rows+=("$pkg|$bins|$installed|$latest|$pkg_status")
         done
@@ -489,7 +501,7 @@ function cmd_list() {
                 $cols[1] $cols[2] $cols[3] $cols[4] "${cols[5]:-}")
             case ${cols[5]:-} in
                 stale) print -r -- "$yellow$line$reset" ;;
-                legacy|"not installed") print -r -- "$dim$line$reset" ;;
+                legacy|"not installed"|external*) print -r -- "$dim$line$reset" ;;
                 *) print -r -- $line ;;
             esac
         done

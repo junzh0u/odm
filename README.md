@@ -45,6 +45,11 @@ optional zsh completion is [`completions/_odm`](./completions/_odm).
 | `odm upgrade [pkg...]` | Reinstall what's outdated (default: everything installed) |
 | `odm list` | All packages with installed vs latest versions |
 
+`list` statuses: blank (up to date), `stale` (newer release available), `legacy`
+(binary present but installed before odm tracked it — `odm upgrade` adopts it),
+`external (<dir>)` (not odm-installed, but something else on `PATH` provides
+the binaries), `not installed`.
+
 Flags: `-f`/`--force` (reinstall / overwrite registration), `-n`/`--dry-run`,
 `-b`/`--bins "cmd1 cmd2"` (with `add`, when the archive's commands differ from
 the package name), `-q`/`-v`, `-h`.

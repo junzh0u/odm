@@ -344,6 +344,15 @@ assert_exit_code "list succeeds" 0 $code
 assert_contains "list marks stale package" "$output" stale
 assert_contains "list marks uninstalled package" "$output" "not installed"
 
+# A registered-but-uninstalled package whose bin exists elsewhere on PATH
+# (here: the stubs dir) is marked external, with the providing directory.
+make_exe $tmp/stubs/foo foo-external
+run_odm list
+assert_contains "list marks externally provided package" "$output" "external ($tmp/stubs)"
+rm -f $tmp/stubs/foo
+run_odm list
+assert_not_contains "external marker gone with the external bin" "$output" external
+
 # ── Test: usage errors ─────────────────────────────────────────────
 
 run_odm
