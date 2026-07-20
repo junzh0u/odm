@@ -223,6 +223,34 @@ output=$(ODM_CATALOG=$catalog zsh -c "source <(zsh $odm init zsh); _odm_package_
 assert_exit_code "sourced integration succeeds" 0 $code
 assert_equals "sourced integration maps aliased bin" mvx $output
 
+# Emitted handler behavior: source the integration into this shell (against
+# the sandbox catalog) and drive command_not_found_handler directly.
+export ODM_CATALOG=$catalog
+source <(zsh $odm init zsh)
+assert_equals "handler maps direct package name" foo "$(_odm_package_for foo)"
+code=0
+output=$(command_not_found_handler no-such-command 2>&1) || code=$?
+assert_exit_code "handler: unknown command returns 127" 127 $code
+assert_equals "handler: unknown command message" "zsh: command not found: no-such-command" $output
+
+hstub=$tmp/handler-stubs   # odm stub; exec-capable dir (see tmpdir note above)
+mkdir -p $hstub
+print -rl -- '#!/bin/sh' 'exit 1' > $hstub/odm
+chmod +x $hstub/odm
+code=0
+output=$(path=($hstub $path); command_not_found_handler foo 2>&1) || code=$?
+assert_exit_code "handler: failed install returns 127" 127 $code
+
+# Install "succeeds" (stub creates the command) -> handler re-invokes it
+# with the original args.
+print -rl -- '#!/bin/sh' "printf '#!/bin/sh\\necho fake-foo:\$@\\n' > $hstub/foo" "chmod +x $hstub/foo" > $hstub/odm
+chmod +x $hstub/odm
+code=0
+output=$(path=($hstub $path); command_not_found_handler foo --flag 2>&1) || code=$?
+assert_exit_code "handler: successful install runs the command" 0 $code
+assert_equals "handler: command ran with original args" "fake-foo:--flag" $output
+unfunction command_not_found_handler  # don't leak into the rest of the suite
+
 # ── Test: unknown package ──────────────────────────────────────────
 
 run_odm install nosuchpkg
