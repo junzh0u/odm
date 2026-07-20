@@ -54,6 +54,8 @@ Commands:
   upgrade [pkg...]    Reinstall packages whose latest release differs from the
                       installed one (default: every installed package)
   list                Show all packages with installed vs latest versions
+  orphans             List bin-dir files not owned by any package (pre-odm
+                      leftovers, hand-installed tools); -d to pick and delete
   init zsh            Print shell integration: sources the catalog and enables
                       install-on-first-use. Add to your rc:
                         source <(odm init zsh)
@@ -61,6 +63,8 @@ Commands:
 Options:
   -b, --bins BINS   With add: space-separated commands the archive provides,
                     when they differ from the package name
+  -d, --delete      With orphans: interactively pick entries to delete (fzf
+                    multi-select when available, per-item prompt otherwise)
   -f, --force       Reinstall even if up to date; with add, overwrite an
                     existing registration
   -n, --dry-run     Show what would happen without doing it
@@ -72,6 +76,7 @@ Environment:
   ODM_CATALOG    Catalog file (default: ~/.config/odm/packages.zsh)
   ODM_STATE_DIR  Manifests and receipts (default: ~/.local/share/odm)
   ODM_BIN_DIR    Where binaries are installed (default: ~/.local/bin)
+  ODM_SELECTOR   Multi-select command for orphans -d (default: fzf --multi)
 
 Exit codes:
   0   Success
@@ -91,9 +96,10 @@ function wrong_usage() {
 
 # === Argparse ===
 
-typeset -a FLAG_DRY_RUN FLAG_FORCE FLAG_HELP FLAG_QUIET FLAG_VERBOSE ARG_BINS
+typeset -a FLAG_DELETE FLAG_DRY_RUN FLAG_FORCE FLAG_HELP FLAG_QUIET FLAG_VERBOSE ARG_BINS
 zparseopts -D -E -F -- \
     {n,-dry-run}=FLAG_DRY_RUN \
+    {d,-delete}=FLAG_DELETE \
     {f,-force}=FLAG_FORCE \
     {h,-help}=FLAG_HELP \
     {q,-quiet}+=FLAG_QUIET \
@@ -497,6 +503,61 @@ function cmd_list() {
     }
 }
 
+function cmd_orphans() {
+    (( $# == 0 )) || wrong_usage "orphans expects no argument"
+    local -A owned=()
+    local file= line=
+    for file in $ODM_STATE_DIR/*/manifest(N); do
+        while IFS= read -r line; do
+            owned[${line:t}]=1
+        done < $file
+    done
+    # Symlinks are never odm's (installs only move regular files), so skip
+    # them; directories are always strays (odm installs flat files only).
+    local -a found=()
+    for file in $ODM_BIN_DIR/*(N); do
+        [[ -L $file ]] && continue
+        [[ -f $file && -n ${owned[${file:t}]:-} ]] && continue
+        found+=($file)
+    done
+    if (( $#found == 0 )); then
+        log_info "no orphans in $ODM_BIN_DIR"
+        return 0
+    fi
+    if (( ! $#FLAG_DELETE )); then
+        print -rl -- $found
+        log_info "$#found item(s) not owned by any package — review and delete manually (or rerun with -d)"
+        return 0
+    fi
+
+    local -a selected=() selector=(${=ODM_SELECTOR:-})
+    (( $#selector )) || selector=(fzf --multi --header='TAB: toggle  Enter: delete selected  Esc: abort')
+    if (( $+commands[$selector[1]] )) || [[ -x $selector[1] ]]; then
+        selected=(${(f)"$(print -rl -- $found | $selector)"})
+    elif [[ -t 0 ]]; then
+        for file in $found; do
+            if read -q "?delete $file? [y/N] "; then
+                selected+=($file)
+            fi
+            print -u2 ""
+        done
+    else
+        log_fatal "orphans -d needs fzf or an interactive terminal"
+    fi
+    if (( $#selected == 0 )); then
+        log_info "nothing selected"
+        return 0
+    fi
+    for file in $selected; do
+        if (( $#FLAG_DRY_RUN )); then
+            log_info "would delete $file"
+        else
+            rm -rf -- $file
+            log_info "deleted $file"
+        fi
+    done
+}
+
 function cmd_init() {
     (( $# == 1 )) || wrong_usage "init expects a shell name"
     [[ $1 == zsh ]] || wrong_usage "init: only zsh is supported"
@@ -540,6 +601,9 @@ shift
 if (( $#ARG_BINS )) && [[ $verb != add ]]; then
     wrong_usage "-b/--bins is only valid with add"
 fi
+if (( $#FLAG_DELETE )) && [[ $verb != orphans ]]; then
+    wrong_usage "-d/--delete is only valid with orphans"
+fi
 
 case $verb in
     add)       cmd_add $@ ;;
@@ -548,6 +612,7 @@ case $verb in
     uninstall) cmd_uninstall $@ ;;
     upgrade)   cmd_upgrade $@ ;;
     list)      cmd_list $@ ;;
+    orphans)   cmd_orphans $@ ;;
     init)      cmd_init $@ ;;
     *)         wrong_usage "unknown command: $verb" ;;
 esac

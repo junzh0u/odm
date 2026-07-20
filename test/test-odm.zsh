@@ -119,6 +119,7 @@ chmod +x $tmp/stubs/curl
 
 stub_latest=
 stub_archive=
+stub_selector=
 output=
 code=0
 
@@ -126,6 +127,7 @@ function run_odm() {
     code=0
     output=$(ODM_CATALOG=$catalog ODM_STATE_DIR=$state ODM_BIN_DIR=$bindir \
         STUB_LATEST=$stub_latest STUB_ARCHIVE=$stub_archive \
+        ODM_SELECTOR=$stub_selector \
         PATH=$tmp/stubs:$PATH zsh $odm $@ 2>&1) || code=$?
 }
 
@@ -271,6 +273,48 @@ assert_contains "registration kept after uninstall" "$(catalog_keys)" mvx
 
 run_odm uninstall mvx
 assert_exit_code "uninstall of not-installed package is a no-op success" 0 $code
+
+# ── Test: orphans ──────────────────────────────────────────────────
+
+log_info "── orphans ──"
+
+mkdir $bindir/leftover-dir
+ln -s /nonexistent $bindir/leftover-link
+run_odm orphans
+assert_exit_code "orphans succeeds" 0 $code
+assert_contains "orphans lists unowned file" "$output" $bindir/decoy
+assert_contains "orphans lists stray dir" "$output" $bindir/leftover-dir
+assert_not_contains "orphans skips owned binary" "$output" $bindir/foo
+assert_not_contains "orphans skips symlinks" "$output" leftover-link
+
+# -d pipes candidates through the selector (fzf by default; ODM_SELECTOR
+# points at a stub here, by absolute path so a real fzf can't shadow it).
+# The stub "selects" by filtering stdin.
+print -rl -- '#!/usr/bin/env zsh' 'grep decoy' > $tmp/stubs/fzf
+chmod +x $tmp/stubs/fzf
+stub_selector=$tmp/stubs/fzf
+run_odm -n orphans -d
+assert_exit_code "dry-run delete succeeds" 0 $code
+assert_contains "dry-run reports would-delete" "$output" "would delete $bindir/decoy"
+assert_exists "dry-run deletes nothing" $bindir/decoy
+run_odm orphans -d
+assert_exit_code "orphans -d succeeds" 0 $code
+assert_not_exists "selected orphan deleted" $bindir/decoy
+assert_exists "unselected orphan survives" $bindir/leftover-dir
+print -rl -- '#!/usr/bin/env zsh' 'grep leftover-dir' > $tmp/stubs/fzf
+run_odm orphans -d
+assert_not_exists "stray dir deleted when selected" $bindir/leftover-dir
+print -r -- leftover > $bindir/esc-orphan
+print -rl -- '#!/usr/bin/env zsh' 'exit 130' > $tmp/stubs/fzf  # user pressed Esc
+run_odm orphans -d
+assert_exit_code "aborted selection is a no-op success" 0 $code
+assert_contains "aborted selection reports" "$output" "nothing selected"
+assert_exists "aborted selection deletes nothing" $bindir/esc-orphan
+rm $bindir/esc-orphan
+run_odm install -d foo
+assert_exit_code "-d outside orphans exits 2" 2 $code
+stub_selector=
+rm $tmp/stubs/fzf $bindir/leftover-link
 
 # ── Test: remove unregisters ───────────────────────────────────────
 

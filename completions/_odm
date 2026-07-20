@@ -8,11 +8,13 @@ _odm() {
         'uninstall:Remove installed files (keeps the registration)'
         'upgrade:Reinstall packages whose latest release differs'
         'list:Show all packages with installed vs latest versions'
+        'orphans:List bin-dir files not owned by any package'
         'init:Print shell integration for your rc'
     )
 
     _arguments -s -S \
         '(-b --bins)'{-b,--bins}'[Commands the archive provides (with add)]:bins' \
+        '(-d --delete)'{-d,--delete}'[Interactively pick orphans to delete (with orphans)]' \
         '(-f --force)'{-f,--force}'[Reinstall even if up to date / overwrite registration]' \
         '(-n --dry-run)'{-n,--dry-run}'[Show what would happen without doing it]' \
         '*'{-q,--quiet}'[Decrease verbosity]' \

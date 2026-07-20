@@ -63,6 +63,7 @@ optional zsh completion is [`completions/_odm`](./completions/_odm).
 | `odm uninstall <pkg>...` | Remove installed files, keep the registration |
 | `odm upgrade [pkg...]` | Reinstall what's outdated (default: everything installed) |
 | `odm list` | All packages with installed vs latest versions |
+| `odm orphans` | List bin-dir files no package owns; `-d` to pick and delete |
 
 `list` statuses: blank (up to date), `stale` (newer release available), `legacy`
 (binary present but installed before odm tracked it — `odm upgrade` adopts it),
@@ -109,7 +110,11 @@ Three URL shapes are understood:
 - **State** — `~/.local/share/odm/<pkg>/` (override: `$ODM_STATE_DIR`) holds a
   `manifest` (installed file paths) and a `receipt` (version, URL, timestamp).
   A binary installed before odm existed shows as `legacy` in `list`; running
-  `odm upgrade` adopts it.
+  `odm upgrade` adopts it. Afterwards, `odm orphans` lists whatever remains
+  in the bin dir that no package owns (old tarball spillage, hand-installed
+  tools); it never deletes on its own — `odm orphans -d` lets you pick what
+  to remove (fzf multi-select when available — override with `$ODM_SELECTOR`
+  — or a per-item prompt otherwise).
 
 - **Binaries** — `~/.local/bin` (override: `$ODM_BIN_DIR`).
 
