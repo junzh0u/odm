@@ -316,6 +316,49 @@ assert_exit_code "-d outside orphans exits 2" 2 $code
 stub_selector=
 rm $tmp/stubs/fzf $bindir/leftover-link
 
+# ── Test: ignore / unignore ────────────────────────────────────────
+
+log_info "── ignore / unignore ──"
+
+print -r -- keeper > $bindir/keepme
+run_odm orphans
+assert_contains "new orphan listed" "$output" keepme
+run_odm ignore keepme
+assert_exit_code "ignore succeeds" 0 $code
+assert_contains "catalog records the ignore" "$(<$catalog)" '"keepme"'
+run_odm orphans
+assert_not_contains "ignored orphan suppressed" "$output" keepme
+assert_contains "suppression is reported" "$output" "1 ignored"
+run_odm orphans -f
+assert_contains "-f shows ignored orphan" "$output" keepme
+run_odm ignore $bindir/keepme   # path form, e.g. pasted from orphans output
+assert_equals "ignore is idempotent (basename dedup)" 1 "$(grep -c keepme $catalog)"
+run_odm unignore keepme
+assert_exit_code "unignore succeeds" 0 $code
+run_odm orphans
+assert_contains "unignored orphan listed again" "$output" keepme
+run_odm unignore keepme
+assert_exit_code "unignore of unknown name exits 10" 10 $code
+
+# No-arg forms go through the picker (stub selects by filtering stdin).
+print -rl -- '#!/usr/bin/env zsh' 'grep keepme' > $tmp/stubs/fzf
+chmod +x $tmp/stubs/fzf
+stub_selector=$tmp/stubs/fzf
+run_odm ignore
+assert_exit_code "no-arg ignore succeeds" 0 $code
+assert_contains "picked orphan ignored" "$(<$catalog)" '"keepme"'
+run_odm unignore
+assert_exit_code "no-arg unignore succeeds" 0 $code
+assert_not_contains "picked name unignored" "$(<$catalog)" '"keepme"'
+run_odm unignore
+assert_contains "no-arg unignore with empty list reports" "$output" "nothing ignored"
+rm $bindir/keepme
+run_odm ignore
+assert_exit_code "no-arg ignore without orphans succeeds" 0 $code
+assert_contains "no-arg ignore without orphans reports" "$output" "no orphans to ignore"
+stub_selector=
+rm $tmp/stubs/fzf
+
 # ── Test: remove unregisters ───────────────────────────────────────
 
 run_odm remove mvx

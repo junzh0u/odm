@@ -64,6 +64,7 @@ optional zsh completion is [`completions/_odm`](./completions/_odm).
 | `odm upgrade [pkg...]` | Reinstall what's outdated (default: everything installed) |
 | `odm list` | All packages with installed vs latest versions |
 | `odm orphans` | List bin-dir files no package owns; `-d` to pick and delete |
+| `odm ignore [name...]` | Mark orphans as expected — suppressed from future scans (no names: pick interactively; `unignore` undoes) |
 
 `list` statuses: blank (up to date), `stale` (newer release available), `legacy`
 (binary present but installed before odm tracked it — `odm upgrade` adopts it),
@@ -114,7 +115,10 @@ Three URL shapes are understood:
   in the bin dir that no package owns (old tarball spillage, hand-installed
   tools); it never deletes on its own — `odm orphans -d` lets you pick what
   to remove (fzf multi-select when available — override with `$ODM_SELECTOR`
-  — or a per-item prompt otherwise).
+  — or a per-item prompt otherwise). Tools you keep on purpose get
+  `odm ignore <name>` once, and future scans stay quiet about them (the
+  ignore list lives in the catalog, so it syncs with it; `orphans -f` shows
+  everything anyway).
 
 - **Binaries** — `~/.local/bin` (override: `$ODM_BIN_DIR`).
 

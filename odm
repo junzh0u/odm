@@ -56,6 +56,9 @@ Commands:
   list                Show all packages with installed vs latest versions
   orphans             List bin-dir files not owned by any package (pre-odm
                       leftovers, hand-installed tools); -d to pick and delete
+  ignore [name...]    Mark orphans as expected — suppressed from future scans
+                      (no names: pick from current orphans)
+  unignore [name...]  Stop ignoring names (no names: pick from the list)
   init zsh            Print shell integration: sources the catalog and enables
                       install-on-first-use. Add to your rc:
                         source <(odm init zsh)
@@ -66,7 +69,8 @@ Options:
   -d, --delete      With orphans: interactively pick entries to delete (fzf
                     multi-select when available, per-item prompt otherwise)
   -f, --force       Reinstall even if up to date; with add, overwrite an
-                    existing registration
+                    existing registration; with orphans, include ignored
+                    entries
   -n, --dry-run     Show what would happen without doing it
   -q, --quiet       Decrease verbosity
   -v, --verbose     Increase verbosity
@@ -81,7 +85,7 @@ Environment:
 Exit codes:
   0   Success
   2   Wrong usage
-  10  Unknown package
+  10  Unknown package or name
   11  Version resolution, download, or extraction failed
   12  Package already registered
   13  Expected binaries not found in archive
@@ -114,6 +118,7 @@ fi
 # === Catalog ===
 
 typeset -gA _odm_packages=() _odm_bins=()
+typeset -ga _odm_ignores=()
 
 function load_catalog() {
     [[ -r $ODM_CATALOG ]] && source $ODM_CATALOG
@@ -134,6 +139,11 @@ function write_catalog() {
         print -r -- "typeset -gA _odm_bins=("
         for key in ${(ok)_odm_bins}; do
             print -r -- "    [$key]=\"${_odm_bins[$key]}\""
+        done
+        print -r -- ")"
+        print -r -- "typeset -ga _odm_ignores=("
+        for key in ${(ou)_odm_ignores}; do
+            print -r -- "    \"$key\""
         done
         print -r -- ")"
     } > $tmp && mv $tmp $ODM_CATALOG
@@ -503,8 +513,13 @@ function cmd_list() {
     }
 }
 
-function cmd_orphans() {
-    (( $# == 0 )) || wrong_usage "orphans expects no argument"
+# Sets globals: orphans_found (bin-dir entries no manifest owns) and
+# orphans_suppressed (count hidden by the ignore list; FLAG_FORCE keeps them
+# in orphans_found instead). Symlinks are never odm's (installs only move
+# regular files), so they're skipped; directories are always strays.
+function scan_orphans() {
+    typeset -ga orphans_found=()
+    typeset -gi orphans_suppressed=0
     local -A owned=()
     local file= line=
     for file in $ODM_STATE_DIR/*/manifest(N); do
@@ -512,43 +527,64 @@ function cmd_orphans() {
             owned[${line:t}]=1
         done < $file
     done
-    # Symlinks are never odm's (installs only move regular files), so skip
-    # them; directories are always strays (odm installs flat files only).
-    local -a found=()
     for file in $ODM_BIN_DIR/*(N); do
         [[ -L $file ]] && continue
         [[ -f $file && -n ${owned[${file:t}]:-} ]] && continue
-        found+=($file)
+        if (( ! $#FLAG_FORCE )) && (( ${_odm_ignores[(Ie)${file:t}]} )); then
+            (( ++orphans_suppressed ))
+            continue
+        fi
+        orphans_found+=($file)
     done
-    if (( $#found == 0 )); then
-        log_info "no orphans in $ODM_BIN_DIR"
-        return 0
-    fi
-    if (( ! $#FLAG_DELETE )); then
-        print -rl -- $found
-        log_info "$#found item(s) not owned by any package — review and delete manually (or rerun with -d)"
-        return 0
-    fi
+}
 
-    local -a selected=() selector=(${=ODM_SELECTOR:-})
-    (( $#selector )) || selector=(fzf --multi --header='TAB: toggle  Enter: delete selected  Esc: abort')
+# pick_multi <action> <candidate>... — sets the global `picked` array via
+# $ODM_SELECTOR/fzf multi-select, or a per-item prompt on a terminal.
+# Returns 1 when no selection mechanism is available.
+function pick_multi() {
+    local action=$1
+    shift
+    typeset -ga picked=()
+    local item=
+    local -a selector=(${=ODM_SELECTOR:-})
+    (( $#selector )) || selector=(fzf --multi --header="TAB: toggle  Enter: $action selected  Esc: abort")
     if (( $+commands[$selector[1]] )) || [[ -x $selector[1] ]]; then
-        selected=(${(f)"$(print -rl -- $found | $selector)"})
+        picked=(${(f)"$(print -rl -- $@ | $selector)"})
     elif [[ -t 0 ]]; then
-        for file in $found; do
-            if read -q "?delete $file? [y/N] "; then
-                selected+=($file)
+        for item in $@; do
+            if read -q "?$action $item? [y/N] "; then
+                picked+=($item)
             fi
             print -u2 ""
         done
     else
-        log_fatal "orphans -d needs fzf or an interactive terminal"
+        return 1
     fi
-    if (( $#selected == 0 )); then
+    return 0
+}
+
+function cmd_orphans() {
+    (( $# == 0 )) || wrong_usage "orphans expects no argument"
+    scan_orphans
+    local file= note=
+    (( orphans_suppressed )) && note=" ($orphans_suppressed ignored, -f to show)"
+    if (( $#orphans_found == 0 )); then
+        log_info "no orphans in $ODM_BIN_DIR$note"
+        return 0
+    fi
+    if (( ! $#FLAG_DELETE )); then
+        print -rl -- $orphans_found
+        log_info "$#orphans_found item(s) not owned by any package — review and delete manually (or rerun with -d)$note"
+        return 0
+    fi
+
+    pick_multi delete $orphans_found \
+        || log_fatal "orphans -d needs fzf or an interactive terminal"
+    if (( $#picked == 0 )); then
         log_info "nothing selected"
         return 0
     fi
-    for file in $selected; do
+    for file in $picked; do
         if (( $#FLAG_DRY_RUN )); then
             log_info "would delete $file"
         else
@@ -556,6 +592,64 @@ function cmd_orphans() {
             log_info "deleted $file"
         fi
     done
+}
+
+function cmd_ignore() {
+    local -a names=($@)
+    if (( $#names == 0 )); then
+        scan_orphans
+        if (( $#orphans_found == 0 )); then
+            log_info "no orphans to ignore"
+            return 0
+        fi
+        pick_multi ignore $orphans_found \
+            || log_fatal "ignore without names needs fzf or an interactive terminal"
+        if (( $#picked == 0 )); then
+            log_info "nothing selected"
+            return 0
+        fi
+        names=($picked)
+    fi
+    local name=
+    for name in $names; do
+        name=${name:t}  # accept paths straight from orphans output
+        if (( $#FLAG_DRY_RUN )); then
+            log_info "would ignore $name"
+        else
+            _odm_ignores+=($name)
+            log_info "ignoring $name in orphans scans"
+        fi
+    done
+    (( $#FLAG_DRY_RUN )) || write_catalog
+}
+
+function cmd_unignore() {
+    local -a names=($@)
+    if (( $#names == 0 )); then
+        if (( $#_odm_ignores == 0 )); then
+            log_info "nothing ignored"
+            return 0
+        fi
+        pick_multi unignore $_odm_ignores \
+            || log_fatal "unignore without names needs fzf or an interactive terminal"
+        if (( $#picked == 0 )); then
+            log_info "nothing selected"
+            return 0
+        fi
+        names=($picked)
+    fi
+    local name=
+    for name in $names; do
+        name=${name:t}
+        (( ${_odm_ignores[(Ie)$name]} )) || log_fatal "not ignored: $name" 10
+        if (( $#FLAG_DRY_RUN )); then
+            log_info "would unignore $name"
+        else
+            _odm_ignores=(${_odm_ignores:#$name})
+            log_info "no longer ignoring $name"
+        fi
+    done
+    (( $#FLAG_DRY_RUN )) || write_catalog
 }
 
 function cmd_init() {
@@ -613,6 +707,8 @@ case $verb in
     upgrade)   cmd_upgrade $@ ;;
     list)      cmd_list $@ ;;
     orphans)   cmd_orphans $@ ;;
+    ignore)    cmd_ignore $@ ;;
+    unignore)  cmd_unignore $@ ;;
     init)      cmd_init $@ ;;
     *)         wrong_usage "unknown command: $verb" ;;
 esac
