@@ -1,7 +1,7 @@
 #!/usr/bin/env zsh
 #
 # Automated odm test suite — no network, no HOME pollution: every odm run gets
-# ODM_CATALOG/ODM_STATE_DIR/ODM_BIN_DIR inside a tmpdir plus a `curl` stub
+# ODM_CATALOG/ODM_HOME/ODM_BIN_DIR inside a tmpdir plus a `curl` stub
 # first on PATH. The stub serves a canned latest-release redirect (STUB_LATEST)
 # and a fixture archive (STUB_ARCHIVE) built by the tests.
 
@@ -88,7 +88,8 @@ if ! $tmp/exec-probe 2>/dev/null; then
     tmp=$(mktemp -d $HOME/.cache/test_odm.XXXXXX)
 fi
 catalog=$tmp/catalog.zsh
-state=$tmp/state
+odm_home=$tmp/odm-home
+state=$odm_home/state
 bindir=$tmp/bin
 mkdir -p $tmp/stubs $tmp/fixtures $bindir
 
@@ -119,15 +120,13 @@ chmod +x $tmp/stubs/curl
 
 stub_latest=
 stub_archive=
-stub_selector=
 output=
 code=0
 
 function run_odm() {
     code=0
-    output=$(ODM_CATALOG=$catalog ODM_STATE_DIR=$state ODM_BIN_DIR=$bindir \
+    output=$(ODM_CATALOG=$catalog ODM_HOME=$odm_home ODM_BIN_DIR=$bindir \
         STUB_LATEST=$stub_latest STUB_ARCHIVE=$stub_archive \
-        ODM_SELECTOR=$stub_selector \
         PATH=$tmp/stubs:$PATH zsh $odm $@ 2>&1) || code=$?
 }
 
@@ -252,11 +251,20 @@ output=$(path=($hstub $path); command_not_found_handler foo --flag 2>&1) || code
 assert_exit_code "handler: successful install runs the command" 0 $code
 assert_equals "handler: command ran with original args" "fake-foo:--flag" $output
 unfunction command_not_found_handler  # don't leak into the rest of the suite
+unset ODM_BIN_DIR  # the sourced integration exports it; keep the suite clean
 
 # ── Test: unknown package ──────────────────────────────────────────
 
 run_odm install nosuchpkg
 assert_exit_code "install of unregistered package exits 10" 10 $code
+
+# ── Test: explicitly-set but missing catalog warns ─────────────────
+
+code=0
+output=$(ODM_CATALOG=$tmp/no-such-catalog.zsh ODM_HOME=$odm_home ODM_BIN_DIR=$bindir \
+    PATH=$tmp/stubs:$PATH zsh $odm list 2>&1) || code=$?
+assert_exit_code "missing explicit catalog still succeeds" 0 $code
+assert_contains "missing explicit catalog warns" "$output" "catalog not found"
 
 # ── Test: uninstall removes exactly manifest files ─────────────────
 
@@ -273,91 +281,6 @@ assert_contains "registration kept after uninstall" "$(catalog_keys)" mvx
 
 run_odm uninstall mvx
 assert_exit_code "uninstall of not-installed package is a no-op success" 0 $code
-
-# ── Test: orphans ──────────────────────────────────────────────────
-
-log_info "── orphans ──"
-
-mkdir $bindir/leftover-dir
-ln -s /nonexistent $bindir/leftover-link
-run_odm orphans
-assert_exit_code "orphans succeeds" 0 $code
-assert_contains "orphans lists unowned file" "$output" $bindir/decoy
-assert_contains "orphans lists stray dir" "$output" $bindir/leftover-dir
-assert_not_contains "orphans skips owned binary" "$output" $bindir/foo
-assert_not_contains "orphans skips symlinks" "$output" leftover-link
-
-# -d pipes candidates through the selector (fzf by default; ODM_SELECTOR
-# points at a stub here, by absolute path so a real fzf can't shadow it).
-# The stub "selects" by filtering stdin.
-print -rl -- '#!/usr/bin/env zsh' 'grep decoy' > $tmp/stubs/fzf
-chmod +x $tmp/stubs/fzf
-stub_selector=$tmp/stubs/fzf
-run_odm -n orphans -d
-assert_exit_code "dry-run delete succeeds" 0 $code
-assert_contains "dry-run reports would-delete" "$output" "would delete $bindir/decoy"
-assert_exists "dry-run deletes nothing" $bindir/decoy
-run_odm orphans -d
-assert_exit_code "orphans -d succeeds" 0 $code
-assert_not_exists "selected orphan deleted" $bindir/decoy
-assert_exists "unselected orphan survives" $bindir/leftover-dir
-print -rl -- '#!/usr/bin/env zsh' 'grep leftover-dir' > $tmp/stubs/fzf
-run_odm orphans -d
-assert_not_exists "stray dir deleted when selected" $bindir/leftover-dir
-print -r -- leftover > $bindir/esc-orphan
-print -rl -- '#!/usr/bin/env zsh' 'exit 130' > $tmp/stubs/fzf  # user pressed Esc
-run_odm orphans -d
-assert_exit_code "aborted selection is a no-op success" 0 $code
-assert_contains "aborted selection reports" "$output" "nothing selected"
-assert_exists "aborted selection deletes nothing" $bindir/esc-orphan
-rm $bindir/esc-orphan
-run_odm install -d foo
-assert_exit_code "-d outside orphans exits 2" 2 $code
-stub_selector=
-rm $tmp/stubs/fzf $bindir/leftover-link
-
-# ── Test: ignore / unignore ────────────────────────────────────────
-
-log_info "── ignore / unignore ──"
-
-print -r -- keeper > $bindir/keepme
-run_odm orphans
-assert_contains "new orphan listed" "$output" keepme
-run_odm ignore keepme
-assert_exit_code "ignore succeeds" 0 $code
-assert_contains "catalog records the ignore" "$(<$catalog)" '"keepme"'
-run_odm orphans
-assert_not_contains "ignored orphan suppressed" "$output" keepme
-assert_contains "suppression is reported" "$output" "1 ignored"
-run_odm orphans -f
-assert_contains "-f shows ignored orphan" "$output" keepme
-run_odm ignore $bindir/keepme   # path form, e.g. pasted from orphans output
-assert_equals "ignore is idempotent (basename dedup)" 1 "$(grep -c keepme $catalog)"
-run_odm unignore keepme
-assert_exit_code "unignore succeeds" 0 $code
-run_odm orphans
-assert_contains "unignored orphan listed again" "$output" keepme
-run_odm unignore keepme
-assert_exit_code "unignore of unknown name exits 10" 10 $code
-
-# No-arg forms go through the picker (stub selects by filtering stdin).
-print -rl -- '#!/usr/bin/env zsh' 'grep keepme' > $tmp/stubs/fzf
-chmod +x $tmp/stubs/fzf
-stub_selector=$tmp/stubs/fzf
-run_odm ignore
-assert_exit_code "no-arg ignore succeeds" 0 $code
-assert_contains "picked orphan ignored" "$(<$catalog)" '"keepme"'
-run_odm unignore
-assert_exit_code "no-arg unignore succeeds" 0 $code
-assert_not_contains "picked name unignored" "$(<$catalog)" '"keepme"'
-run_odm unignore
-assert_contains "no-arg unignore with empty list reports" "$output" "nothing ignored"
-rm $bindir/keepme
-run_odm ignore
-assert_exit_code "no-arg ignore without orphans succeeds" 0 $code
-assert_contains "no-arg ignore without orphans reports" "$output" "no orphans to ignore"
-stub_selector=
-rm $tmp/stubs/fzf
 
 # ── Test: remove unregisters ───────────────────────────────────────
 
@@ -414,16 +337,29 @@ assert_contains "no reinstall when current" "$output" "up to date"
 run_odm upgrade -f tool
 assert_contains "forced reinstall" "$output" "installed tool"
 
-# ── Test: legacy adoption via bare upgrade ─────────────────────────
+# ── Test: no-arg install + default bin dir ─────────────────────────
 
-log_info "── legacy adoption ──"
+log_info "── install (no args) ──"
 
-run_odm uninstall foo   # keep foo registered but out of bare upgrade's targets
-rm -rf $state/tool  # simulate a pre-odm install: binary present, no state
-run_odm upgrade
-assert_exit_code "bare upgrade succeeds" 0 $code
-assert_exists "legacy package adopted (receipt written)" $state/tool/receipt
-assert_contains "legacy package reinstalled" "$(<$state/tool/receipt)" "version=3.0.0"
+run_odm uninstall foo
+stub_archive=$tmp/fixtures/foo.tar.gz
+run_odm install
+assert_exit_code "no-arg install succeeds" 0 $code
+assert_exists "no-arg install installs missing package" $bindir/foo
+assert_contains "no-arg install skips installed packages" "$output" "already installed"
+
+# Without ODM_BIN_DIR, binaries land in the state dir's own bin/ — a dir odm
+# fully owns, so nothing else can ever be mistaken for a package's files.
+run_odm uninstall foo
+code=0
+output=$(ODM_CATALOG=$catalog ODM_HOME=$odm_home ODM_BIN_DIR= \
+    STUB_LATEST=$stub_latest STUB_ARCHIVE=$stub_archive \
+    PATH=$tmp/stubs:$PATH zsh $odm install foo 2>&1) || code=$?
+assert_exit_code "install with default bin dir succeeds" 0 $code
+assert_exists "default bin dir is \$ODM_HOME/bin" $odm_home/bin/foo
+run_odm uninstall foo
+assert_not_exists "uninstall removes from default dir too" $odm_home/bin/foo
+stub_archive=$tmp/fixtures/tool.tar.gz
 
 # ── Test: dry run ──────────────────────────────────────────────────
 

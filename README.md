@@ -4,9 +4,10 @@ A tiny package manager for prebuilt binaries from GitHub releases. One
 self-contained zsh script: no daemon, no root, no runtime beyond `zsh`,
 `curl`, `tar` (and `unzip` or `7z` for `.zip` assets).
 
-Point it at a release archive; it installs just the binaries into
-`~/.local/bin`, remembers what it installed, and can cleanly uninstall and
-upgrade later.
+Point it at a release archive; it installs just the binaries into a bin dir
+of its own, remembers what it installed, and can cleanly uninstall and
+upgrade later. The dir is odm's alone — everything in it belongs to a
+package, and your other bin dirs are never touched.
 
 ```console
 $ odm add just "https://github.com/casey/just/releases/download/{v}/just-{v}-x86_64-unknown-linux-musl.tar.gz"
@@ -29,14 +30,15 @@ That's how odm started — and here's what the one-liner doesn't give you:
 - **Clean installs.** Release archives bundle READMEs, licenses, man pages,
   and completion scripts that all land next to your binaries. odm extracts to
   a temp dir and moves in **only the declared binaries** (zip archives too,
-  via `unzip` or `7z`).
+  via `unzip` or `7z`), into a dir it owns outright — your `~/.local/bin`
+  stays yours.
 - **Exact uninstalls.** A manifest records what each install added, so
   `uninstall` removes exactly that — nothing else.
 - **Version awareness.** odm resolves the concrete version behind
   `releases/latest` and records it in a receipt; `list` shows installed vs
   latest at a glance and `upgrade` reinstalls only what's actually outdated.
-  Binaries you installed by hand before odm show up as `legacy` (adopted by
-  the next `upgrade`) or `external` (provided elsewhere on `PATH`).
+  A cataloged tool that something else already provides on `PATH` shows as
+  `external`.
 - **A declarative catalog.** Packages live in one sourceable zsh file you can
   keep in your dotfiles — check it in, sync it across machines, and every
   host knows how to (re)install everything with one `odm install`/`upgrade`.
@@ -59,15 +61,12 @@ optional zsh completion is [`completions/_odm`](./completions/_odm).
 |---|---|
 | `odm add <pkg> <url>` | Register a package and install it |
 | `odm remove <pkg>...` | Uninstall and unregister |
-| `odm install <pkg>...` | Install registered packages |
+| `odm install [pkg...]` | Install registered packages (default: all of them) |
 | `odm uninstall <pkg>...` | Remove installed files, keep the registration |
 | `odm upgrade [pkg...]` | Reinstall what's outdated (default: everything installed) |
 | `odm list` | All packages with installed vs latest versions |
-| `odm orphans` | List bin-dir files no package owns; `-d` to pick and delete |
-| `odm ignore [name...]` | Mark orphans as expected — suppressed from future scans (no names: pick interactively; `unignore` undoes) |
 
-`list` statuses: blank (up to date), `stale` (newer release available), `legacy`
-(binary present but installed before odm tracked it — `odm upgrade` adopts it),
+`list` statuses: blank (up to date), `stale` (newer release available),
 `external (<dir>)` (not odm-installed, but something else on `PATH` provides
 the binaries), `not installed`.
 
@@ -108,19 +107,15 @@ Three URL shapes are understood:
   )
   ```
 
-- **State** — `~/.local/share/odm/<pkg>/` (override: `$ODM_STATE_DIR`) holds a
-  `manifest` (installed file paths) and a `receipt` (version, URL, timestamp).
-  A binary installed before odm existed shows as `legacy` in `list`; running
-  `odm upgrade` adopts it. Afterwards, `odm orphans` lists whatever remains
-  in the bin dir that no package owns (old tarball spillage, hand-installed
-  tools); it never deletes on its own — `odm orphans -d` lets you pick what
-  to remove (fzf multi-select when available — override with `$ODM_SELECTOR`
-  — or a per-item prompt otherwise). Tools you keep on purpose get
-  `odm ignore <name>` once, and future scans stay quiet about them (the
-  ignore list lives in the catalog, so it syncs with it; `orphans -f` shows
-  everything anyway).
-
-- **Binaries** — `~/.local/bin` (override: `$ODM_BIN_DIR`).
+- **Home** — `~/.local/share/odm` (override: `$ODM_HOME`) holds everything
+  odm owns: `state/<pkg>/` with a `manifest` (installed file paths) and a
+  `receipt` (version, URL, timestamp) per package, and `bin/` (override:
+  `$ODM_BIN_DIR`) with the binaries, which `odm init zsh` puts on your
+  `PATH`. Because only odm writes there, ownership is never ambiguous: no
+  orphan files, no cleanup tooling needed. Migrating a machine that
+  installed the same tools some other way is just `odm install` (everything
+  lands in odm's dir, shadowing the old copies) followed by deleting the old
+  copies whenever you get around to it.
 
 ## Auto-install on first use
 
@@ -130,12 +125,12 @@ Add one line to your `.zshrc` (or `.zshenv`, to cover scripts too):
 source <(odm init zsh)
 ```
 
-It sources the catalog and hooks `command_not_found_handler`: the first time
-you type a cataloged command that isn't installed, odm installs it and then
-runs it with your original arguments. Anything not in the catalog still fails
-with the usual `command not found` (exit 127). Prefer zero forks at shell
-startup? `odm init zsh` just prints zsh — paste its output into your rc
-instead.
+It puts odm's bin dir on `PATH`, sources the catalog, and hooks
+`command_not_found_handler`: the first time you type a cataloged command that
+isn't installed, odm installs it and then runs it with your original
+arguments. Anything not in the catalog still fails with the usual
+`command not found` (exit 127). Prefer zero forks at shell startup?
+`odm init zsh` just prints zsh — paste its output into your rc instead.
 
 ## Tests
 

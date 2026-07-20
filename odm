@@ -3,8 +3,10 @@
 # odm — on-demand manager
 #
 # Installs prebuilt binaries from GitHub release archives (.tar.gz/.tgz/.zip)
-# into a bin dir on your PATH, tracking what it installed so packages can be
-# cleanly uninstalled and upgraded.
+# into its own bin dir (put it on your PATH; `init zsh` does), tracking what
+# it installed so packages can be cleanly uninstalled and upgraded. The dir
+# is odm's alone — everything in it belongs to a package, and your other
+# bin dirs are never touched.
 #
 # Self-contained: a single file depending only on zsh, curl, tar, and
 # unzip-or-7z for .zip archives. No other files from this repo are required.
@@ -20,9 +22,10 @@
 setopt no_unset
 zmodload zsh/datetime
 
+_catalog_from_env=$+ODM_CATALOG
 : ${ODM_CATALOG:=${XDG_CONFIG_HOME:-$HOME/.config}/odm/packages.zsh}
-: ${ODM_STATE_DIR:=${XDG_DATA_HOME:-$HOME/.local/share}/odm}
-: ${ODM_BIN_DIR:=$HOME/.local/bin}
+: ${ODM_HOME:=${XDG_DATA_HOME:-$HOME/.local/share}/odm}
+: ${ODM_BIN_DIR:=$ODM_HOME/bin}
 
 # === Logging ===
 
@@ -49,43 +52,36 @@ Commands:
                       .tar.gz/.tgz/.zip release asset; {v} in it expands to
                       the latest release version (tag without leading v).
   remove <pkg>...     Uninstall and unregister packages
-  install <pkg>...    Install registered packages
+  install [pkg...]    Install registered packages (default: all of them)
   uninstall <pkg>...  Remove installed files (keeps the registration)
   upgrade [pkg...]    Reinstall packages whose latest release differs from the
                       installed one (default: every installed package)
   list                Show all packages with installed vs latest versions
-  orphans             List bin-dir files not owned by any package (pre-odm
-                      leftovers, hand-installed tools); -d to pick and delete
-  ignore [name...]    Mark orphans as expected — suppressed from future scans
-                      (no names: pick from current orphans)
-  unignore [name...]  Stop ignoring names (no names: pick from the list)
-  init zsh            Print shell integration: sources the catalog and enables
+  init zsh            Print shell integration: puts the bin dir on PATH,
+                      sources the catalog, and enables
                       install-on-first-use. Add to your rc:
                         source <(odm init zsh)
 
 Options:
   -b, --bins BINS   With add: space-separated commands the archive provides,
                     when they differ from the package name
-  -d, --delete      With orphans: interactively pick entries to delete (fzf
-                    multi-select when available, per-item prompt otherwise)
   -f, --force       Reinstall even if up to date; with add, overwrite an
-                    existing registration; with orphans, include ignored
-                    entries
+                    existing registration
   -n, --dry-run     Show what would happen without doing it
   -q, --quiet       Decrease verbosity
   -v, --verbose     Increase verbosity
   -h, --help        Show this help
 
 Environment:
-  ODM_CATALOG    Catalog file (default: ~/.config/odm/packages.zsh)
-  ODM_STATE_DIR  Manifests and receipts (default: ~/.local/share/odm)
-  ODM_BIN_DIR    Where binaries are installed (default: ~/.local/bin)
-  ODM_SELECTOR   Multi-select command for orphans -d (default: fzf --multi)
+  ODM_CATALOG  Catalog file (default: ~/.config/odm/packages.zsh)
+  ODM_HOME     odm's home, holding bin/ and per-package state/ with manifests
+               and receipts (default: ~/.local/share/odm)
+  ODM_BIN_DIR  Where binaries are installed (default: $ODM_HOME/bin)
 
 Exit codes:
   0   Success
   2   Wrong usage
-  10  Unknown package or name
+  10  Unknown package
   11  Version resolution, download, or extraction failed
   12  Package already registered
   13  Expected binaries not found in archive
@@ -100,10 +96,9 @@ function wrong_usage() {
 
 # === Argparse ===
 
-typeset -a FLAG_DELETE FLAG_DRY_RUN FLAG_FORCE FLAG_HELP FLAG_QUIET FLAG_VERBOSE ARG_BINS
+typeset -a FLAG_DRY_RUN FLAG_FORCE FLAG_HELP FLAG_QUIET FLAG_VERBOSE ARG_BINS
 zparseopts -D -E -F -- \
     {n,-dry-run}=FLAG_DRY_RUN \
-    {d,-delete}=FLAG_DELETE \
     {f,-force}=FLAG_FORCE \
     {h,-help}=FLAG_HELP \
     {q,-quiet}+=FLAG_QUIET \
@@ -118,10 +113,15 @@ fi
 # === Catalog ===
 
 typeset -gA _odm_packages=() _odm_bins=()
-typeset -ga _odm_ignores=()
 
 function load_catalog() {
-    [[ -r $ODM_CATALOG ]] && source $ODM_CATALOG
+    if [[ -r $ODM_CATALOG ]]; then
+        source $ODM_CATALOG
+    elif (( _catalog_from_env )); then
+        # A default-path catalog simply may not exist yet; an explicitly
+        # pointed-to one that's missing is almost certainly a mistake.
+        log_warning "catalog not found: $ODM_CATALOG (stale ODM_CATALOG in this shell?)"
+    fi
     true
 }
 
@@ -139,11 +139,6 @@ function write_catalog() {
         print -r -- "typeset -gA _odm_bins=("
         for key in ${(ok)_odm_bins}; do
             print -r -- "    [$key]=\"${_odm_bins[$key]}\""
-        done
-        print -r -- ")"
-        print -r -- "typeset -ga _odm_ignores=("
-        for key in ${(ou)_odm_ignores}; do
-            print -r -- "    \"$key\""
         done
         print -r -- ")"
     } > $tmp && mv $tmp $ODM_CATALOG
@@ -192,31 +187,22 @@ function resolve_release() {
 # === State ===
 
 function is_installed() {
-    [[ -d $ODM_STATE_DIR/$1 ]]
-}
-
-function is_legacy_installed() {
-    local bin=
-    is_installed $1 && return 1
-    for bin in ${=$(bins_for $1)}; do
-        [[ -x $ODM_BIN_DIR/$bin ]] || return 1
-    done
-    return 0
+    [[ -d $ODM_HOME/state/$1 ]]
 }
 
 function receipt_version() {
     local line=
-    if [[ -r $ODM_STATE_DIR/$1/receipt ]]; then
+    if [[ -r $ODM_HOME/state/$1/receipt ]]; then
         while IFS= read -r line; do
             [[ $line == version=* ]] && { print -r -- ${line#version=}; return }
-        done < $ODM_STATE_DIR/$1/receipt
+        done < $ODM_HOME/state/$1/receipt
     fi
     print -r -- unknown
 }
 
 function manifest_files() {
-    [[ -r $ODM_STATE_DIR/$1/manifest ]] || return 0
-    print -r -- "$(<$ODM_STATE_DIR/$1/manifest)"
+    [[ -r $ODM_HOME/state/$1/manifest ]] || return 0
+    print -r -- "$(<$ODM_HOME/state/$1/manifest)"
 }
 
 function is_elf() {
@@ -309,18 +295,18 @@ function do_install() {
 
         # Clean out the previous install (if any) before moving the new files in.
         delete_manifest_files $pkg
-        mkdir -p $ODM_BIN_DIR $ODM_STATE_DIR/$pkg
+        mkdir -p $ODM_BIN_DIR $ODM_HOME/state/$pkg
         for file in $selected; do
             chmod +x $file
             mv -f -- $file $ODM_BIN_DIR/
         done
-        print -rl -- $ODM_BIN_DIR/${^selected:t} > $ODM_STATE_DIR/$pkg/manifest
+        print -rl -- $ODM_BIN_DIR/${^selected:t} > $ODM_HOME/state/$pkg/manifest
         {
             print -r -- "version=$resolved_version"
             print -r -- "url=$resolved_url"
             print -r -- "template=$template"
             print -r -- "installed_at=$EPOCHSECONDS"
-        } > $ODM_STATE_DIR/$pkg/receipt
+        } > $ODM_HOME/state/$pkg/receipt
     } always {
         rm -rf $tmp
     }
@@ -334,7 +320,7 @@ function do_uninstall() {
         return 0
     fi
     delete_manifest_files $pkg
-    rm -rf $ODM_STATE_DIR/$pkg
+    rm -rf $ODM_HOME/state/$pkg
     log_info "uninstalled $pkg"
 }
 
@@ -382,10 +368,17 @@ function cmd_remove() {
 }
 
 function cmd_install() {
-    (( $# >= 1 )) || wrong_usage "install expects at least one package"
-    require_registered $@
+    local -a targets=($@)
+    if (( $#targets == 0 )); then
+        targets=(${(ok)_odm_packages})
+        if (( $#targets == 0 )); then
+            log_info "nothing registered"
+            return 0
+        fi
+    fi
+    require_registered $targets
     local pkg=
-    for pkg in $@; do
+    for pkg in $targets; do
         if is_installed $pkg && (( ! $#FLAG_FORCE )); then
             log_info "$pkg already installed ($(receipt_version $pkg))"
         else
@@ -413,9 +406,7 @@ function cmd_upgrade() {
     local pkg=
     if (( $#targets == 0 )); then
         for pkg in ${(ok)_odm_packages}; do
-            if is_installed $pkg || is_legacy_installed $pkg; then
-                targets+=($pkg)
-            fi
+            is_installed $pkg && targets+=($pkg)
         done
         if (( $#targets == 0 )); then
             log_info "nothing installed"
@@ -465,14 +456,9 @@ function cmd_list() {
             [[ -z $latest || $latest == unknown ]] && latest="?"
             if is_installed $pkg; then
                 installed=$(receipt_version $pkg)
-                if [[ $installed == unknown ]]; then
-                    pkg_status=legacy
-                elif [[ $latest != "?" && $installed != $latest ]]; then
+                if [[ $latest != "?" && $installed != unknown && $installed != $latest ]]; then
                     pkg_status=stale
                 fi
-            elif is_legacy_installed $pkg; then
-                installed=unknown
-                pkg_status=legacy
             else
                 pkg_status="not installed"
                 # All declared bins resolving on PATH outside ODM_BIN_DIR means
@@ -504,7 +490,7 @@ function cmd_list() {
                 $cols[1] $cols[2] $cols[3] $cols[4] "${cols[5]:-}")
             case ${cols[5]:-} in
                 stale) print -r -- "$yellow$line$reset" ;;
-                legacy|"not installed"|external*) print -r -- "$dim$line$reset" ;;
+                "not installed"|external*) print -r -- "$dim$line$reset" ;;
                 *) print -r -- $line ;;
             esac
         done
@@ -513,151 +499,15 @@ function cmd_list() {
     }
 }
 
-# Sets globals: orphans_found (bin-dir entries no manifest owns) and
-# orphans_suppressed (count hidden by the ignore list; FLAG_FORCE keeps them
-# in orphans_found instead). Symlinks are never odm's (installs only move
-# regular files), so they're skipped; directories are always strays.
-function scan_orphans() {
-    typeset -ga orphans_found=()
-    typeset -gi orphans_suppressed=0
-    local -A owned=()
-    local file= line=
-    for file in $ODM_STATE_DIR/*/manifest(N); do
-        while IFS= read -r line; do
-            owned[${line:t}]=1
-        done < $file
-    done
-    for file in $ODM_BIN_DIR/*(N); do
-        [[ -L $file ]] && continue
-        [[ -f $file && -n ${owned[${file:t}]:-} ]] && continue
-        if (( ! $#FLAG_FORCE )) && (( ${_odm_ignores[(Ie)${file:t}]} )); then
-            (( ++orphans_suppressed ))
-            continue
-        fi
-        orphans_found+=($file)
-    done
-}
-
-# pick_multi <action> <candidate>... — sets the global `picked` array via
-# $ODM_SELECTOR/fzf multi-select, or a per-item prompt on a terminal.
-# Returns 1 when no selection mechanism is available.
-function pick_multi() {
-    local action=$1
-    shift
-    typeset -ga picked=()
-    local item=
-    local -a selector=(${=ODM_SELECTOR:-})
-    (( $#selector )) || selector=(fzf --multi --header="TAB: toggle  Enter: $action selected  Esc: abort")
-    if (( $+commands[$selector[1]] )) || [[ -x $selector[1] ]]; then
-        picked=(${(f)"$(print -rl -- $@ | $selector)"})
-    elif [[ -t 0 ]]; then
-        for item in $@; do
-            if read -q "?$action $item? [y/N] "; then
-                picked+=($item)
-            fi
-            print -u2 ""
-        done
-    else
-        return 1
-    fi
-    return 0
-}
-
-function cmd_orphans() {
-    (( $# == 0 )) || wrong_usage "orphans expects no argument"
-    scan_orphans
-    local file= note=
-    (( orphans_suppressed )) && note=" ($orphans_suppressed ignored, -f to show)"
-    if (( $#orphans_found == 0 )); then
-        log_info "no orphans in $ODM_BIN_DIR$note"
-        return 0
-    fi
-    if (( ! $#FLAG_DELETE )); then
-        print -rl -- $orphans_found
-        log_info "$#orphans_found item(s) not owned by any package — review and delete manually (or rerun with -d)$note"
-        return 0
-    fi
-
-    pick_multi delete $orphans_found \
-        || log_fatal "orphans -d needs fzf or an interactive terminal"
-    if (( $#picked == 0 )); then
-        log_info "nothing selected"
-        return 0
-    fi
-    for file in $picked; do
-        if (( $#FLAG_DRY_RUN )); then
-            log_info "would delete $file"
-        else
-            rm -rf -- $file
-            log_info "deleted $file"
-        fi
-    done
-}
-
-function cmd_ignore() {
-    local -a names=($@)
-    if (( $#names == 0 )); then
-        scan_orphans
-        if (( $#orphans_found == 0 )); then
-            log_info "no orphans to ignore"
-            return 0
-        fi
-        pick_multi ignore $orphans_found \
-            || log_fatal "ignore without names needs fzf or an interactive terminal"
-        if (( $#picked == 0 )); then
-            log_info "nothing selected"
-            return 0
-        fi
-        names=($picked)
-    fi
-    local name=
-    for name in $names; do
-        name=${name:t}  # accept paths straight from orphans output
-        if (( $#FLAG_DRY_RUN )); then
-            log_info "would ignore $name"
-        else
-            _odm_ignores+=($name)
-            log_info "ignoring $name in orphans scans"
-        fi
-    done
-    (( $#FLAG_DRY_RUN )) || write_catalog
-}
-
-function cmd_unignore() {
-    local -a names=($@)
-    if (( $#names == 0 )); then
-        if (( $#_odm_ignores == 0 )); then
-            log_info "nothing ignored"
-            return 0
-        fi
-        pick_multi unignore $_odm_ignores \
-            || log_fatal "unignore without names needs fzf or an interactive terminal"
-        if (( $#picked == 0 )); then
-            log_info "nothing selected"
-            return 0
-        fi
-        names=($picked)
-    fi
-    local name=
-    for name in $names; do
-        name=${name:t}
-        (( ${_odm_ignores[(Ie)$name]} )) || log_fatal "not ignored: $name" 10
-        if (( $#FLAG_DRY_RUN )); then
-            log_info "would unignore $name"
-        else
-            _odm_ignores=(${_odm_ignores:#$name})
-            log_info "no longer ignoring $name"
-        fi
-    done
-    (( $#FLAG_DRY_RUN )) || write_catalog
-}
-
 function cmd_init() {
     (( $# == 1 )) || wrong_usage "init expects a shell name"
     [[ $1 == zsh ]] || wrong_usage "init: only zsh is supported"
     cat <<'EOF'
-# odm shell integration — install cataloged packages on first use.
+# odm shell integration — bin dir on PATH + install cataloged packages on
+# first use.
 export ODM_CATALOG=${ODM_CATALOG:-${XDG_CONFIG_HOME:-$HOME/.config}/odm/packages.zsh}
+export ODM_BIN_DIR=${ODM_BIN_DIR:-${ODM_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/odm}/bin}
+(( ${path[(Ie)$ODM_BIN_DIR]} )) || path=($ODM_BIN_DIR $path)  # fine if not created yet
 typeset -gA _odm_packages _odm_bins
 [[ -r $ODM_CATALOG ]] && source $ODM_CATALOG
 
@@ -695,9 +545,6 @@ shift
 if (( $#ARG_BINS )) && [[ $verb != add ]]; then
     wrong_usage "-b/--bins is only valid with add"
 fi
-if (( $#FLAG_DELETE )) && [[ $verb != orphans ]]; then
-    wrong_usage "-d/--delete is only valid with orphans"
-fi
 
 case $verb in
     add)       cmd_add $@ ;;
@@ -706,9 +553,6 @@ case $verb in
     uninstall) cmd_uninstall $@ ;;
     upgrade)   cmd_upgrade $@ ;;
     list)      cmd_list $@ ;;
-    orphans)   cmd_orphans $@ ;;
-    ignore)    cmd_ignore $@ ;;
-    unignore)  cmd_unignore $@ ;;
     init)      cmd_init $@ ;;
     *)         wrong_usage "unknown command: $verb" ;;
 esac

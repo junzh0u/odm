@@ -8,15 +8,11 @@ _odm() {
         'uninstall:Remove installed files (keeps the registration)'
         'upgrade:Reinstall packages whose latest release differs'
         'list:Show all packages with installed vs latest versions'
-        'orphans:List bin-dir files not owned by any package'
-        'ignore:Mark orphans as expected (suppressed from scans)'
-        'unignore:Stop ignoring names'
         'init:Print shell integration for your rc'
     )
 
     _arguments -s -S \
         '(-b --bins)'{-b,--bins}'[Commands the archive provides (with add)]:bins' \
-        '(-d --delete)'{-d,--delete}'[Interactively pick orphans to delete (with orphans)]' \
         '(-f --force)'{-f,--force}'[Reinstall even if up to date / overwrite registration]' \
         '(-n --dry-run)'{-n,--dry-run}'[Show what would happen without doing it]' \
         '*'{-q,--quiet}'[Decrease verbosity]' \
@@ -42,21 +38,8 @@ _odm() {
                     _describe -t packages 'package' pkgs
                     ;;
                 uninstall|upgrade)
-                    pkgs=(${ODM_STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/odm}/*(N/:t))
+                    pkgs=(${ODM_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/odm}/state/*(N/:t))
                     _describe -t packages 'installed package' pkgs
-                    ;;
-                ignore)
-                    local -a orphans=(${(f)"$(odm orphans 2>/dev/null)"})
-                    orphans=(${orphans:t})
-                    (( $#orphans )) && _describe -t orphans 'orphan' orphans
-                    ;;
-                unignore)
-                    typeset -ga _odm_ignores
-                    if (( ! ${#_odm_ignores} )); then
-                        local catalog=${ODM_CATALOG:-${XDG_CONFIG_HOME:-$HOME/.config}/odm/packages.zsh}
-                        [[ -r $catalog ]] && source $catalog
-                    fi
-                    (( ${#_odm_ignores} )) && _describe -t ignores 'ignored name' _odm_ignores
                     ;;
                 init)
                     _values 'shell' zsh
