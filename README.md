@@ -14,8 +14,8 @@ $ odm add just "https://github.com/casey/just/releases/download/{v}/just-{v}-x86
 [odm] installed just 1.55.1
 
 $ odm list
-PACKAGE  BINS  INSTALLED  LATEST  STATUS
-just     just  1.55.1     1.56.0  stale
+PACKAGE  AUTHOR  BINS  INSTALLED  LATEST  STATUS
+just     casey   just  1.55.1     1.56.0  stale
 
 $ odm upgrade
 [odm] installing just 1.56.0...

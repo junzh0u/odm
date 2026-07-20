@@ -416,6 +416,8 @@ run_odm list
 assert_exit_code "list succeeds" 0 $code
 assert_contains "list marks stale package" "$output" stale
 assert_contains "list marks uninstalled package" "$output" "not installed"
+assert_contains "list has AUTHOR column" "$output" AUTHOR
+assert_contains "list shows package author" "$output" stub
 
 # A registered-but-uninstalled package whose bin exists elsewhere on PATH
 # (here: the stubs dir) is marked external, with the providing directory.

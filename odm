@@ -148,6 +148,16 @@ function bins_for() {
     print -r -- ${_odm_bins[$1]:-$1}
 }
 
+# GitHub owner from a package URL; "-" for non-GitHub URLs.
+function author_for() {
+    local url=${_odm_packages[$1]}
+    if [[ $url == https://github.com/*/* ]]; then
+        print -r -- ${${url#https://github.com/}%%/*}
+    else
+        print -r -- -
+    fi
+}
+
 function require_registered() {
     local pkg=
     for pkg in $@; do
@@ -449,7 +459,7 @@ function cmd_list() {
         if [[ -t 1 && -z ${NO_COLOR:-} ]]; then
             yellow=$'\e[33m' dim=$'\e[2m' reset=$'\e[0m'
         fi
-        rows=("PACKAGE|BINS|INSTALLED|LATEST|STATUS")
+        rows=("PACKAGE|AUTHOR|BINS|INSTALLED|LATEST|STATUS")
         for pkg in ${(ok)_odm_packages}; do
             local bins=$(bins_for $pkg) latest= installed=- pkg_status=
             [[ -r $tmp/$pkg.latest ]] && latest=$(<$tmp/$pkg.latest)
@@ -474,21 +484,21 @@ function cmd_list() {
                     pkg_status="external (${external[1]:h})"
                 fi
             fi
-            rows+=("$pkg|$bins|$installed|$latest|$pkg_status")
+            rows+=("$pkg|$(author_for $pkg)|$bins|$installed|$latest|$pkg_status")
         done
 
-        widths=(7 4 9 6)  # header column widths
+        widths=(7 6 4 9 6)  # header column widths
         for row in $rows; do
             cols=("${(@s:|:)row}")
-            for i in 1 2 3 4; do
+            for i in 1 2 3 4 5; do
                 (( ${#cols[i]} > widths[i] )) && widths[i]=${#cols[i]}
             done
         done
         for row in $rows; do
             cols=("${(@s:|:)row}")
-            line=$(printf "%-${widths[1]}s  %-${widths[2]}s  %-${widths[3]}s  %-${widths[4]}s  %s" \
-                $cols[1] $cols[2] $cols[3] $cols[4] "${cols[5]:-}")
-            case ${cols[5]:-} in
+            line=$(printf "%-${widths[1]}s  %-${widths[2]}s  %-${widths[3]}s  %-${widths[4]}s  %-${widths[5]}s  %s" \
+                $cols[1] $cols[2] $cols[3] $cols[4] $cols[5] "${cols[6]:-}")
+            case ${cols[6]:-} in
                 stale) print -r -- "$yellow$line$reset" ;;
                 "not installed"|external*) print -r -- "$dim$line$reset" ;;
                 *) print -r -- $line ;;
